@@ -1,0 +1,231 @@
+# pack CLI helpers — sourced by pack() on first CLI invocation.
+# Do NOT define function pack here — it lives in pack.ksh.
+
+# Extract a field from semicolon-delimited metadata. Sets REPLY.
+function _pack_field {
+	typeset meta=";$1" key="$2"
+	if [[ "$meta" != *";${key}="* ]]; then REPLY=""; return 1; fi
+	typeset v="${meta#*";${key}="}"; REPLY="${v%%;*}"
+}
+
+# Run build command (if any) in a subshell rooted at the package directory.
+function _pack_run_build {
+	typeset meta="$1" dir="$2" name="$3"
+	[[ "$meta" != *"build="* ]] && return 0
+	_pack_field "$meta" build
+	( cd "$dir" && eval "$REPLY" ) || { print -u2 "pack: build failed for $name"; return 1; }
+}
+
+# Record commit + epoch timestamp in PACK_STATE.
+function _pack_stamp {
+	_pack_git_head "$1"
+	PACK_STATE[$2]="${REPLY}:$(printf '%(%s)T' now)"
+}
+
+# ── install ──────────────────────────────────────────────────────────────────
+function _pack_cmd_install {
+	typeset -a names=("${@:-${!PACK_REGISTRY[@]}}")
+	typeset name meta
+	for name in "${names[@]}"; do
+		meta="${PACK_REGISTRY[$name]:-}"
+		[[ -z "$meta" ]] && { print -u2 "pack: unknown package: $name"; continue; }
+		[[ "$meta" == *"disabled=true"* ]] && continue
+		_pack_field "$meta" local; [[ "$REPLY" == true ]] && { print "pack: $name is local, skipping"; continue; }
+		_pack_field "$meta" path;  typeset dir="$REPLY"
+		[[ -d "$dir" ]] && { print "pack: $name already installed"; continue; }
+
+		_pack_field "$meta" source; typeset src="$REPLY"
+		_pack_field "$meta" branch; typeset br="$REPLY"
+		typeset tag="" commit=""
+		[[ "$meta" == *"tag="* ]]    && { _pack_field "$meta" tag;    tag="$REPLY"; }
+		[[ "$meta" == *"commit="* ]] && { _pack_field "$meta" commit; commit="$REPLY"; }
+
+		print "pack: installing $name ..."
+		_pack_git_clone "$src" "$dir" "$br" "$tag" "$commit" || continue
+		_pack_run_build "$meta" "$dir" "$name" || continue
+		_pack_stamp "$dir" "$name"
+		print "pack: $name installed (${PACK_STATE[$name]%%:*})"
+	done
+}
+
+# ── update ───────────────────────────────────────────────────────────────────
+function _pack_cmd_update {
+	typeset -a names=("${@:-${!PACK_REGISTRY[@]}}")
+	typeset name meta
+	for name in "${names[@]}"; do
+		meta="${PACK_REGISTRY[$name]:-}"
+		[[ -z "$meta" ]] && { print -u2 "pack: unknown package: $name"; continue; }
+		[[ "$meta" == *"disabled=true"* ]] && continue
+		_pack_field "$meta" local
+		if [[ "$REPLY" == true ]]; then
+			# local packages are updatable only if their source is a git URL
+			_pack_field "$meta" source
+			_pack_git_is_url "$REPLY" || continue
+		fi
+		_pack_field "$meta" path;  typeset dir="$REPLY"
+		[[ ! -d "$dir" ]] && { print -u2 "pack: $name not installed"; continue; }
+
+		_pack_git_head "$dir"; typeset old="$REPLY"
+		_pack_field "$meta" branch
+		_pack_git_update "$dir" "$REPLY" || continue
+
+		_pack_git_head "$dir"
+		if [[ "$REPLY" != "$old" ]]; then
+			_pack_run_build "$meta" "$dir" "$name"
+			_pack_stamp "$dir" "$name"
+			print "pack: $name updated ($old -> $REPLY)"
+		else
+			print "pack: $name already up to date ($REPLY)"
+		fi
+	done
+}
+
+# ── remove ───────────────────────────────────────────────────────────────────
+function _pack_cmd_remove {
+	(( $# < 1 )) && { print -u2 "pack: remove requires a package name"; return 2; }
+	typeset name meta
+	for name in "$@"; do
+		meta="${PACK_REGISTRY[$name]:-}"
+		[[ -z "$meta" ]] && { print -u2 "pack: unknown package: $name"; continue; }
+		_pack_field "$meta" local; typeset loc="$REPLY"
+		_pack_field "$meta" path;  typeset dir="$REPLY"
+		# Only rm remote packages; local packages are just unregistered
+		[[ "$loc" != true && -d "$dir" ]] && command rm -rf "$dir"
+		[[ -d "$PACK_CACHE/$name" ]] && command rm -rf "$PACK_CACHE/$name"
+		unset "PACK_REGISTRY[$name]" "PACK_CONFIGS[$name]" "PACK_STATE[$name]" "PACK_LOADED[$name]"
+		print "pack: removed $name"
+	done
+}
+
+# ── list ─────────────────────────────────────────────────────────────────────
+function _pack_cmd_list {
+	(( ${#PACK_REGISTRY[@]} == 0 )) && { print "No packages declared."; return 0; }
+	typeset name meta status
+	printf '%-20s %-12s %-8s %s\n' NAME STATUS LOAD LOADED
+	printf '%-20s %-12s %-8s %s\n' ---- ------ ---- ------
+	for name in "${!PACK_REGISTRY[@]}"; do
+		meta="${PACK_REGISTRY[$name]}"
+		_pack_field "$meta" disabled; typeset dis="$REPLY"
+		_pack_field "$meta" local;    typeset loc="$REPLY"
+		_pack_field "$meta" path;     typeset dir="$REPLY"
+		_pack_field "$meta" load;     typeset ld="$REPLY"
+		if [[ "$dis" == true ]]; then status="disabled"
+		elif [[ "$loc" == true ]]; then status="local"
+		elif [[ -d "$dir" ]]; then status="installed"
+		else status="missing"; fi
+		printf '%-20s %-12s %-8s %s\n' "$name" "$status" "$ld" "${PACK_LOADED[$name]:+*}"
+	done
+}
+
+# ── info ─────────────────────────────────────────────────────────────────────
+function _pack_cmd_info {
+	(( $# < 1 )) && { print -u2 "pack: info requires a package name"; return 2; }
+	typeset name="$1" meta="${PACK_REGISTRY[$1]:-}"
+	[[ -z "$meta" ]] && { print -u2 "pack: unknown package: $name"; return 1; }
+	print "Package:  $name"
+	_pack_field "$meta" source;   print "Source:   $REPLY"
+	_pack_field "$meta" path;     print "Path:     $REPLY"
+	_pack_field "$meta" branch;   print "Branch:   $REPLY"
+	_pack_field "$meta" local;    print "Local:    $REPLY"
+	_pack_field "$meta" disabled; print "Disabled: $REPLY"
+	_pack_field "$meta" load;     print "Load:     $REPLY"
+	print "Loaded:   ${PACK_LOADED[$name]:+yes}"
+	typeset config="${PACK_CONFIGS[$name]:-}"
+	[[ -n "$config" ]] && print "Config:   $config"
+	typeset state="${PACK_STATE[$name]:-}"
+	if [[ -n "$state" ]]; then
+		print "Commit:   ${state%%:*}"
+		print "Updated:  ${state#*:}"
+	fi
+	_pack_field "$meta" path
+	if [[ -d "$REPLY/.git" ]]; then
+		typeset br; br=$(command git -C "$REPLY" branch --show-current 2>/dev/null)
+		[[ -n "$br" ]] && print "Git HEAD: $br"
+	fi
+}
+
+# ── self-update ──────────────────────────────────────────────────────────────
+function _pack_cmd_self_update {
+	if [[ -z "${PACK_REGISTRY[pack]+set}" ]]; then
+		print -u2 "pack: self-update requires pack to be self-registered"
+		return 1
+	fi
+	_pack_cmd_update pack
+}
+
+# ── help ─────────────────────────────────────────────────────────────────────
+function _pack_cmd_help {
+	print "Usage: pack <command> [args]
+
+Commands:
+  install [name...]   Install packages (all declared if no name given)
+  update  [name...]   Update packages from git
+  remove  <name>      Remove a package
+  list                Show all declared packages and status
+  freeze              Generate lockfile (pin versions)
+  restore             Install from lockfile
+  info    <name>      Show detailed package info
+  run [--pkg name] <cmd>  Run command with package's PATH
+  diff                    Show changes since last freeze
+  self-update             Update pack.ksh itself (via pack update)
+  help                    Show this message"
+}
+
+# ── run ──────────────────────────────────────────────────────────────────
+# Run a command with a package's PATH dirs prepended (in a subshell).
+function _pack_cmd_run {
+	typeset name
+	if [[ "${1:-}" == --pkg ]]; then
+		shift; name="${1:-}"; shift
+	else
+		name="${1:-}"; shift
+	fi
+	[[ -z "$name" ]] && { print -u2 "pack run: usage: pack run [--pkg name] <cmd> [args]"; return 2; }
+	typeset meta="${PACK_REGISTRY[$name]:-}"
+	[[ -z "$meta" ]] && { print -u2 "pack run: unknown package: $name"; return 1; }
+	_pack_field "$meta" path; typeset pkg_path="$REPLY"
+	typeset config="${PACK_CONFIGS[$name]:-}" new_path="$PATH"
+	_pack_extract_field "$config" "path"
+	typeset dir
+	for dir in $REPLY; do
+		if [[ "$dir" == /* ]]; then new_path="$dir:$new_path"
+		else new_path="$pkg_path/$dir:$new_path"; fi
+	done
+	( PATH="$new_path" "$@" )
+}
+
+# ── diff ─────────────────────────────────────────────────────────────────
+# Show what changed since last pack freeze.
+function _pack_cmd_diff {
+	_pack_lock_path; typeset lockfile="$REPLY"
+	[[ -f "$lockfile" ]] || { print -u2 "pack diff: no lockfile found (run 'pack freeze' first)"; return 1; }
+	typeset -A locked
+	typeset line lname lsource lcommit lts
+	while IFS='|' read -r lname lsource lcommit lts; do
+		[[ "$lname" == '#'* || -z "$lname" ]] && continue
+		locked[$lname]="$lcommit"
+	done < "$lockfile"
+	typeset name meta
+	for name in "${!PACK_REGISTRY[@]}"; do
+		meta="${PACK_REGISTRY[$name]}"
+		[[ "$meta" == *"disabled=true"* ]] && continue
+		[[ "$meta" == *"local=true"* ]] && continue
+		_pack_field "$meta" path; typeset pkg_path="$REPLY"
+		[[ -d "$pkg_path/.git" ]] || continue
+		if [[ -z "${locked[$name]:-}" ]]; then
+			print "$name: not in lockfile (new)"
+		else
+			_pack_git_head "$pkg_path"; typeset head="$REPLY"
+			typeset lck="${locked[$name]}"; typeset lck_short="${lck:0:${#head}}"
+			if [[ "$head" == "$lck_short" ]]; then
+				print "$name: up to date ($head)"
+			else
+				print "$name: locked at ${lck_short}, currently at ${head}"
+			fi
+			unset "locked[$name]"
+		fi
+	done
+	for name in "${!locked[@]}"; do
+		print "$name: in lockfile but not declared (removed)"
+	done
+}
