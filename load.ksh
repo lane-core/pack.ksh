@@ -11,30 +11,29 @@ if (( ${#PACK_ORDER[@]} == 0 )); then
 fi
 
 # ── Load Packages ───────────────────────────────────────────────────────────
-typeset _pack_l_name _pack_l_meta _pack_l_path _pack_l_source
+typeset _pack_l_name _pack_l_path _pack_l_source
 typeset _pack_l_branch _pack_l_tag _pack_l_commit
-typeset _pack_l_load _pack_l_disabled _pack_l_local _pack_l_entry
+typeset _pack_l_load _pack_l_disabled _pack_l_local _pack_l_entry _pack_l_sf
+typeset -i _pack_l_fail=0
 
 for _pack_l_name in "${PACK_ORDER[@]}"; do
 	# Skip already-loaded packages
 	[[ -n "${PACK_LOADED[$_pack_l_name]+set}" ]] && continue
 
-	_pack_l_meta=";${PACK_REGISTRY[$_pack_l_name]}"
-
 	# Skip disabled (belt-and-suspenders; _pack_resolve already filters these)
-	_pack_l_disabled="${_pack_l_meta#*";disabled="}"; _pack_l_disabled="${_pack_l_disabled%%;*}"
+	_pack_l_disabled="${PACK_REGISTRY[$_pack_l_name].disabled}"
 	[[ "$_pack_l_disabled" == true ]] && continue
 
-	# Extract metadata fields (;-anchored to prevent substring matches like path/fpath)
-	_pack_l_path="${_pack_l_meta#*";path="}";         _pack_l_path="${_pack_l_path%%;*}"
-	_pack_l_source="${_pack_l_meta#*";source="}";     _pack_l_source="${_pack_l_source%%;*}"
-	_pack_l_branch="${_pack_l_meta#*";branch="}";     _pack_l_branch="${_pack_l_branch%%;*}"
-	_pack_l_tag="${_pack_l_meta#*";tag="}";           _pack_l_tag="${_pack_l_tag%%;*}"
-	_pack_l_commit="${_pack_l_meta#*";commit="}";     _pack_l_commit="${_pack_l_commit%%;*}"
-	_pack_l_load="${_pack_l_meta#*";load="}";         _pack_l_load="${_pack_l_load%%;*}"
-	_pack_l_local="${_pack_l_meta#*";local="}";       _pack_l_local="${_pack_l_local%%;*}"
+	# Extract metadata fields via compound access
+	_pack_l_path="${PACK_REGISTRY[$_pack_l_name].path}"
+	_pack_l_source="${PACK_REGISTRY[$_pack_l_name].source}"
+	_pack_l_branch="${PACK_REGISTRY[$_pack_l_name].branch}"
+	_pack_l_tag="${PACK_REGISTRY[$_pack_l_name].tag}"
+	_pack_l_commit="${PACK_REGISTRY[$_pack_l_name].commit}"
+	_pack_l_load="${PACK_REGISTRY[$_pack_l_name].load}"
+	_pack_l_local="${PACK_REGISTRY[$_pack_l_name].local}"
 
-	# manual: skip entirely — user loads via pack_load later
+	# manual: skip — user loads via `pack path` and `. entry_point`
 	[[ "$_pack_l_load" == manual ]] && continue
 
 	# Install if not present on disk (remote packages only)
@@ -43,11 +42,13 @@ for _pack_l_name in "${PACK_ORDER[@]}"; do
 		if _pack_git_is_url "$_pack_l_source"; then
 			_pack_git_clone "$_pack_l_source" "$_pack_l_path" \
 				"$_pack_l_branch" "$_pack_l_tag" "$_pack_l_commit" || {
-				print -u2 "pack: failed to install $_pack_l_name"
+				print -u2 "pack: ${_pack_l_name}: ${RESULT.msg}"
+				(( _pack_l_fail++ ))
 				continue
 			}
 		elif [[ "$_pack_l_local" != true ]]; then
 			print -u2 "pack: $_pack_l_name: package directory missing: $_pack_l_path"
+			(( _pack_l_fail++ ))
 			continue
 		fi
 	fi
@@ -63,7 +64,14 @@ for _pack_l_name in "${PACK_ORDER[@]}"; do
 	_pack_fire pre-load "$_pack_l_name"
 	if [[ "$_pack_l_load" == now ]]; then
 		_pack_l_entry=""
-		if [[ -f "$_pack_l_path/init.ksh" ]]; then
+		_pack_l_sf="${PACK_REGISTRY[$_pack_l_name].source_file}"
+		if [[ -n "$_pack_l_sf" ]]; then
+			if [[ "$_pack_l_sf" == /* ]]; then
+				_pack_l_entry="$_pack_l_sf"
+			else
+				_pack_l_entry="$_pack_l_path/$_pack_l_sf"
+			fi
+		elif [[ -f "$_pack_l_path/init.ksh" ]]; then
 			_pack_l_entry="$_pack_l_path/init.ksh"
 		elif [[ -f "$_pack_l_path/plugin.ksh" ]]; then
 			_pack_l_entry="$_pack_l_path/plugin.ksh"
@@ -74,6 +82,7 @@ for _pack_l_name in "${PACK_ORDER[@]}"; do
 		if [[ -n "$_pack_l_entry" ]]; then
 			. "$_pack_l_entry" || {
 				print -u2 "pack: $_pack_l_name: failed to source $_pack_l_entry"
+				(( _pack_l_fail++ ))
 				continue
 			}
 		fi
@@ -86,8 +95,10 @@ for _pack_l_name in "${PACK_ORDER[@]}"; do
 	PACK_LOADED[$_pack_l_name]=1
 done
 
+(( _pack_l_fail > 0 )) && print -u2 "pack: ${_pack_l_fail} package(s) failed to load (run 'pack list' to see status)"
+
 # ── Cleanup ─────────────────────────────────────────────────────────────────
 # Remove loop variables from the global namespace
-unset _pack_l_name _pack_l_meta _pack_l_path _pack_l_source
+unset _pack_l_name _pack_l_path _pack_l_source
 unset _pack_l_branch _pack_l_tag _pack_l_commit
-unset _pack_l_load _pack_l_disabled _pack_l_local _pack_l_entry
+unset _pack_l_load _pack_l_disabled _pack_l_local _pack_l_entry _pack_l_sf _pack_l_fail

@@ -15,31 +15,29 @@ function _pack_resolve {
     # Seed every registered, non-disabled package as a graph node
     typeset name
     for name in "${!PACK_REGISTRY[@]}"; do
-        [[ "${PACK_REGISTRY[$name]}" == *"disabled=true"* ]] && continue
+        [[ "${PACK_REGISTRY[$name].disabled}" == true ]] && continue
         in_degree[$name]=0
         adj_list[$name]=""
     done
 
     # Build edges from depends fields in PACK_CONFIGS.
     # If A depends on B, edge B->A (B must load before A).
+    typeset dep bare want actual
+    typeset -i _ndeps _di
     for name in "${!in_degree[@]}"; do
-        typeset config="${PACK_CONFIGS[$name]:-}"
-        [[ "$config" == *"depends=("* ]] || continue
+        [[ -z "${PACK_CONFIGS[$name]+set}" ]] && continue
+        _ndeps=${#PACK_CONFIGS[$name].depends[@]}
+        (( _ndeps == 0 )) && continue
 
-        typeset deps="${config#*'depends=('}"
-        deps="${deps%%')'*}"
-        [[ -z "$deps" ]] && continue
-
-        typeset dep
-        for dep in $deps; do
+        for (( _di = 0; _di < _ndeps; _di++ )); do
+            dep="${PACK_CONFIGS[$name].depends[_di]}"
             # Version constraint: depends=(foo@v1.0) → bare=foo, want=v1.0
-            typeset bare="$dep" want=""
+            bare="$dep" want=""
             if [[ "$dep" == *'@'* ]]; then
                 bare="${dep%%'@'*}"
                 want="${dep#*'@'}"
-                typeset meta="${PACK_REGISTRY[$bare]:-}"
-                if [[ -n "$meta" && -n "$want" ]]; then
-                    typeset actual="${meta#*tag=}"; actual="${actual%%;*}"
+                if [[ -n "${PACK_REGISTRY[$bare]+set}" && -n "$want" ]]; then
+                    actual="${PACK_REGISTRY[$bare].tag:-}"
                     if [[ "$actual" != "$want" ]]; then
                         print -u2 "pack: ${name} depends on ${dep} but ${bare} is declared with tag=${actual}"
                     fi
@@ -47,8 +45,10 @@ function _pack_resolve {
                 dep="$bare"
             fi
 
-            # Silently skip deps that aren't in the graph
-            [[ -n "${in_degree[$dep]+set}" ]] || continue
+            if [[ -z "${in_degree[$dep]+set}" ]]; then
+                print -u2 "pack: warning: ${name} depends on '${dep}' which is not declared"
+                continue
+            fi
 
             adj_list[$dep]="${adj_list[$dep]:+${adj_list[$dep]} }${name}"
             (( in_degree[$name]++ ))
@@ -64,12 +64,12 @@ function _pack_resolve {
     done
 
     typeset -a result
+    typeset current neighbor
     while (( ${#queue[@]} > 0 )); do
-        typeset current="${queue[0]}"
+        current="${queue[0]}"
         queue=("${queue[@]:1}")
         result+=("$current")
 
-        typeset neighbor
         for neighbor in ${adj_list[$current]}; do
             (( in_degree[$neighbor]-- ))
             (( in_degree[$neighbor] == 0 )) && queue+=("$neighbor")
@@ -82,7 +82,7 @@ function _pack_resolve {
         for node in "${!in_degree[@]}"; do
             (( in_degree[$node] > 0 )) && print -u2 "  ${node}"
         done
-        _PACK_ERROR="dependency cycle detected in package graph"
+        _pack_err 1 resolve "dependency cycle detected in package graph" resolve
         return 1
     fi
 

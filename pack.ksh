@@ -12,6 +12,7 @@ typeset -x PACK_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/ksh/pack"
 typeset -x PACK_PACKAGES="$PACK_ROOT/packages"
 typeset -x PACK_STATE_DIR="$PACK_ROOT/state"
 typeset -x PACK_CACHE="$PACK_ROOT/cache"
+typeset -xi PACK_JOBS=${PACK_JOBS:-4}
 typeset -x PACK_SELF="${.sh.file%/*}"
 typeset -x PACK_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/ksh/pack.ksh"
 typeset -x PACK_ORIGIN
@@ -23,16 +24,72 @@ done
 unset _pack_dir
 
 # ── Data Structures ──────────────────────────────────────────────────────────
-typeset -A PACK_REGISTRY     # name -> semicolon-delimited key=value metadata
-typeset -A PACK_CONFIGS      # name -> serialized declarative fields
-typeset -A PACK_STATE        # name -> "commit:timestamp"
-typeset -A PACK_LOADED       # name -> 1 (prevents double-load)
-typeset -a PACK_ORDER        # resolved load order (filled by lib/resolve.ksh)
+typeset -C -A PACK_REGISTRY  # name -> compound: path, source, branch, tag, commit, local, load, disabled, build, source_file, depends
+typeset -C -A PACK_CONFIGS   # name -> compound: fpath[], path[], depends[], alias[], env[], rc
+typeset -C -A PACK_STATE     # name -> compound: commit, timestamp
+typeset -A PACK_LOADED       # name -> 1 (prevents double-load) -- stays flat
+typeset -a PACK_ORDER        # resolved load order -- stays flat
+
+# ── Result Type ─────────────────────────────────────────────────────────────
+# Structured error channel. Success is return 0 (with REPLY for values).
+# RESULT carries detail when functions return 1. Field-by-field assignment
+# preserves typeset -i on code; never reassign RESULT as a whole compound.
+typeset -C RESULT=(typeset -i code=0; typeset type=""; typeset msg=""; typeset op="")
+
+function _pack_err {
+	RESULT.code=${1}; RESULT.type="${2}"; RESULT.msg="${3}"; RESULT.op="${4}"
+	return 1
+}
+
+# ── Pipeline / Functor ──────────────────────────────────────────────────────
+# Iterate packages with optional filter. Uses PACK_ORDER if populated,
+# otherwise falls back to PACK_REGISTRY keys.
+# Usage: _pack_each <callback> [filter]
+_pack_each() {
+	typeset callback="$1" filter="${2:-}" name
+	if (( ${#PACK_ORDER[@]} > 0 )); then
+		for name in "${PACK_ORDER[@]}"; do
+			[[ -n "$filter" ]] && { "$filter" "$name" || continue; }
+			"$callback" "$name"
+		done
+	else
+		for name in "${!PACK_REGISTRY[@]}"; do
+			# Guard against phantom keys left by unset on compound-associative
+			[[ -z "${PACK_REGISTRY[$name].path:-}" && "${PACK_REGISTRY[$name].disabled:-}" != true ]] && continue
+			[[ -n "$filter" ]] && { "$filter" "$name" || continue; }
+			"$callback" "$name"
+		done
+	fi
+}
+
+# Standard filter predicates for _pack_each
+# POSIX-style so they don't create scope barriers for dynamic scoping
+_pack_filter_enabled()   { [[ "${PACK_REGISTRY[$1].disabled:-}" != true ]]; }
+_pack_filter_remote()    { _pack_filter_enabled "$1" && [[ "${PACK_REGISTRY[$1].local:-}" != true ]]; }
+_pack_filter_installed() { _pack_filter_enabled "$1" && [[ -d "${PACK_REGISTRY[$1].path:-}" ]]; }
+
+# ── Reactive Disable ────────────────────────────────────────────────────────
+# Disable a package at runtime. Marks it disabled, removes from PACK_ORDER,
+# and fires package-disabled hook. Use instead of discipline functions (which
+# don't fire on compound-associative arrays in ksh93u+m).
+function _pack_disable {
+	typeset name="$1"
+	[[ -z "${PACK_REGISTRY[$name]+set}" ]] && return 1
+	PACK_REGISTRY[$name].disabled=true
+	# Remove from PACK_ORDER
+	typeset -a _new=()
+	typeset _n
+	for _n in "${PACK_ORDER[@]}"; do
+		[[ "$_n" != "$name" ]] && _new+=("$_n")
+	done
+	PACK_ORDER=("${_new[@]}")
+	_pack_fire "package-disabled" "$name"
+}
 
 # ── Source Lib Helpers ────────────────────────────────────────────────────────
 # Git operations, dependency resolution, and lockfile management. Each is
 # optional — pack.ksh works for declaration without them.
-for _pack_lib in git resolve lock config hooks; do
+for _pack_lib in errors git resolve lock config hooks; do
 	if [[ -f "$PACK_SELF/lib/${_pack_lib}.ksh" ]]; then
 		. "$PACK_SELF/lib/${_pack_lib}.ksh" || {
 			print -u2 "pack: failed to source lib/${_pack_lib}.ksh"
@@ -52,7 +109,10 @@ function _pack_resolve_url {
 		gl:*)  REPLY="https://gitlab.com/${id#gl:}.git" ;;
 		bb:*)  REPLY="https://bitbucket.org/${id#bb:}.git" ;;
 		/*)    REPLY="$id" ;;
-		~*)    REPLY="${id/#\~/$HOME}" ;;
+		~/*)   REPLY="$HOME/${id#'~/'}" ;;
+		~)     REPLY="$HOME" ;;
+		~*)    print -u2 "pack: ~user paths not supported: $id"; REPLY="$id" ;;
+		git@*) REPLY="$id" ;;
 		*/*)   REPLY="https://github.com/$id.git" ;;
 		*)     REPLY="$id" ;;
 	esac
@@ -84,7 +144,7 @@ function _pack_derive_name {
 function pack {
 	# ── CLI subcommands ──────────────────────────────────────────────────
 	case "${1:-}" in
-		install|update|remove|list|freeze|restore|info|run|diff|self-update|help|-h|--help)
+		install|update|remove|list|freeze|restore|info|path|run|diff|self-update|version|help|-h|--help)
 			# Lazy-load CLI handlers from functions/pack
 			if ! typeset -f _pack_cmd_help >/dev/null 2>&1; then
 				. "$PACK_SELF/functions/pack" || return 1
@@ -98,25 +158,32 @@ function pack {
 				freeze)      pack_freeze ;;
 				restore)     pack_restore ;;
 				info)        _pack_cmd_info "$@" ;;
+				path)        _pack_cmd_path "$@" ;;
 				run)         _pack_cmd_run "$@" ;;
 				diff)        _pack_cmd_diff ;;
 				self-update) _pack_cmd_self_update ;;
+				version)     _pack_cmd_version ;;
 				help|-h|--help) _pack_cmd_help ;;
 			esac
 			return
 			;;
 	esac
 
-	# ── Package declaration ──────────────────────────────────────────────
+	# ── No arguments — show help ─────────────────────────────────────────
 	(( $# < 1 )) && {
-		print -u2 "pack: usage: pack <id> [key=value ...]"
-		return 1
+		if ! typeset -f _pack_cmd_help >/dev/null 2>&1; then
+			. "$PACK_SELF/functions/pack" || return 1
+		fi
+		_pack_cmd_help
+		return 0
 	}
+
+	# ── Package declaration ──────────────────────────────────────────────
 	typeset id="$1"; shift
 
 	typeset source name pkg_path
 	typeset as="" branch="" tag="" commit="" url=""
-	typeset local_pkg=false load=lazy build="" disabled=false
+	typeset local_pkg=false load=autoload build="" disabled=false
 	typeset source_file="" rc=""
 	typeset depends_str="" fpath_str="" path_str="" alias_str="" env_str=""
 
@@ -164,7 +231,7 @@ function pack {
 				load)     load="$val" ;;
 				build)    build="$val" ;;
 				disabled) disabled="$val" ;;
-				source)   source_file="$val" ;;
+				entry)    source_file="$val" ;;
 				url)      url="$val" ;;
 				rc)       rc="$val" ;;
 				fpath)    fpath_str="$val" ;;
@@ -180,9 +247,15 @@ function pack {
 		esac
 	done
 
+	# Validate package name (must be safe for word splitting in resolve.ksh)
+	if [[ "$name" == *[[:space:]]* || "$name" == *['*?[']*  ]]; then
+		print -u2 "pack: invalid package name (contains whitespace or glob characters): $name"
+		return 1
+	fi
+
 	# -- Disabled packages get registered but nothing else --
 	[[ "$disabled" == true ]] && {
-		PACK_REGISTRY[$name]="disabled=true"
+		PACK_REGISTRY[$name]=(disabled=true)
 		return 0
 	}
 
@@ -203,47 +276,53 @@ function pack {
 	fi
 
 	# -- Store metadata in registry --
-	PACK_REGISTRY[$name]="path=$pkg_path;source=$source;branch=$branch;tag=$tag;commit=$commit;local=$local_pkg;load=$load;disabled=false"
-	[[ -n "$build" ]]       && PACK_REGISTRY[$name]+=";build=$build"
-	[[ -n "$source_file" ]] && PACK_REGISTRY[$name]+=";source_file=$source_file"
-	[[ -n "$depends_str" ]] && PACK_REGISTRY[$name]+=";depends=$depends_str"
+	PACK_REGISTRY[$name]=(
+		path="$pkg_path"
+		source="$source"
+		branch="$branch"
+		tag="$tag"
+		commit="$commit"
+		local="$local_pkg"
+		load="$load"
+		disabled=false
+		build="$build"
+		source_file="$source_file"
+		depends="$depends_str"
+	)
 
-	# -- Serialize declarative fields into PACK_CONFIGS --
-	typeset config=""
-	[[ -n "$fpath_str" ]] && config+="fpath=($fpath_str);"
-	[[ -n "$path_str" ]]  && config+="path=($path_str);"
-	[[ -n "$alias_str" ]] && config+="alias=($alias_str);"
-	[[ -n "$env_str" ]]     && config+="env=($env_str);"
-	[[ -n "$depends_str" ]] && config+="depends=($depends_str);"
-	[[ -n "$rc" ]]          && config+="rc=($rc);"
-	[[ -n "$config" ]] && PACK_CONFIGS[$name]="$config"
+	# -- Store declarative fields into PACK_CONFIGS --
+	typeset -a _fpath_a=() _path_a=() _depends_a=() _alias_a=() _env_a=()
+	[[ -n "$fpath_str" ]]   && _fpath_a=($fpath_str)
+	[[ -n "$path_str" ]]    && _path_a=($path_str)
+	[[ -n "$depends_str" ]] && _depends_a=($depends_str)
+	[[ -n "$alias_str" ]]   && _alias_a=($alias_str)
+	[[ -n "$env_str" ]]     && _env_a=($env_str)
+
+	PACK_CONFIGS[$name]=(
+		typeset -a fpath=("${_fpath_a[@]}")
+		typeset -a path=("${_path_a[@]}")
+		typeset -a depends=("${_depends_a[@]}")
+		typeset -a alias=("${_alias_a[@]}")
+		typeset -a env=("${_env_a[@]}")
+		rc="$rc"
+	)
 
 	return 0
-}
-
-# ── Field Extraction ─────────────────────────────────────────────────────────
-# Extract the contents of a parenthesized field from a PACK_CONFIGS entry.
-# Prepends a semicolon to anchor the match, preventing "path" from matching
-# inside "fpath". Sets REPLY to the field contents, empty if absent.
-function _pack_extract_field {
-	typeset config=";$1" field="$2"
-	if [[ "$config" == *";${field}=("* ]]; then
-		typeset data="${config#*";${field}=("}"
-		REPLY="${data%%\)*}"
-	else
-		REPLY=""
-	fi
 }
 
 # ── pack_apply_env ────────────────────────────────────────────────────────────
 function pack_apply_env {
 	typeset id="$1"
-	typeset config="${PACK_CONFIGS[$id]:-}"
-	[[ -z "$config" ]] && return 0
-	_pack_extract_field "$config" "env"
-	[[ -z "$REPLY" ]] && return 0
+	[[ -z "${PACK_CONFIGS[$id]+set}" ]] && return 0
+	typeset -i i n
+	n=${#PACK_CONFIGS[$id].env[@]}
+	(( n == 0 )) && return 0
+	# SECURITY: env= exports variables into the current shell session.
+	# A package could override PATH, IFS, or other critical variables.
+	# Only install packages you trust.
 	typeset var
-	for var in $REPLY; do
+	for (( i = 0; i < n; i++ )); do
+		var="${PACK_CONFIGS[$id].env[i]}"
 		[[ "$var" == *=* ]] && export "$var"
 	done
 }
@@ -252,12 +331,13 @@ function pack_apply_env {
 # Prepend directories to PATH. Relative dirs resolve against pkg_path.
 function pack_apply_path {
 	typeset id="$1" pkg_path="$2"
-	typeset config="${PACK_CONFIGS[$id]:-}"
-	[[ -z "$config" ]] && return 0
-	_pack_extract_field "$config" "path"
-	[[ -z "$REPLY" ]] && return 0
+	[[ -z "${PACK_CONFIGS[$id]+set}" ]] && return 0
+	typeset -i i n
+	n=${#PACK_CONFIGS[$id].path[@]}
+	(( n == 0 )) && return 0
 	typeset dir full
-	for dir in $REPLY; do
+	for (( i = 0; i < n; i++ )); do
+		dir="${PACK_CONFIGS[$id].path[i]}"
 		if [[ "$dir" == /* ]]; then full="$dir"; else full="$pkg_path/$dir"; fi
 		[[ -d "$full" ]] && PATH="$full:$PATH"
 	done
@@ -266,12 +346,13 @@ function pack_apply_path {
 # ── pack_apply_alias ─────────────────────────────────────────────────────────
 function pack_apply_alias {
 	typeset id="$1"
-	typeset config="${PACK_CONFIGS[$id]:-}"
-	[[ -z "$config" ]] && return 0
-	_pack_extract_field "$config" "alias"
-	[[ -z "$REPLY" ]] && return 0
+	[[ -z "${PACK_CONFIGS[$id]+set}" ]] && return 0
+	typeset -i i n
+	n=${#PACK_CONFIGS[$id].alias[@]}
+	(( n == 0 )) && return 0
 	typeset def
-	for def in $REPLY; do
+	for (( i = 0; i < n; i++ )); do
+		def="${PACK_CONFIGS[$id].alias[i]}"
 		[[ "$def" == *=* ]] && alias "$def"
 	done
 }
@@ -280,18 +361,20 @@ function pack_apply_alias {
 # Prepend directories to FPATH and autoload their function files.
 function pack_apply_fpath {
 	typeset id="$1" pkg_path="$2"
-	typeset config="${PACK_CONFIGS[$id]:-}"
-	[[ -z "$config" ]] && return 0
-	_pack_extract_field "$config" "fpath"
-	[[ -z "$REPLY" ]] && return 0
+	[[ -z "${PACK_CONFIGS[$id]+set}" ]] && return 0
+	typeset -i i n
+	n=${#PACK_CONFIGS[$id].fpath[@]}
+	(( n == 0 )) && return 0
 	typeset entry full fname
-	for entry in $REPLY; do
+	for (( i = 0; i < n; i++ )); do
+		entry="${PACK_CONFIGS[$id].fpath[i]}"
 		if [[ "$entry" == /* ]]; then full="$entry"; else full="$pkg_path/$entry"; fi
 		if [[ -d "$full" ]]; then
 			FPATH="$full:${FPATH:-}"
 			for fname in "$full"/*; do
 				[[ -f "$fname" ]] || continue
 				typeset base="${fname##*/}"
+				[[ "$base" == .* ]] && continue
 				autoload "${base%.ksh}"
 			done
 		fi
@@ -302,16 +385,29 @@ function pack_apply_fpath {
 # Evaluate rc snippet with PKG_DIR and PKG_NAME set in the environment.
 function pack_apply_rc {
 	typeset id="$1" pkg_path="$2"
-	typeset config="${PACK_CONFIGS[$id]:-}"
-	[[ -z "$config" ]] && return 0
-	_pack_extract_field "$config" "rc"
-	[[ -z "$REPLY" ]] && return 0
-	PKG_DIR="$pkg_path" PKG_NAME="$id" eval "$REPLY"
+	[[ -z "${PACK_CONFIGS[$id]+set}" ]] && return 0
+	typeset rc_snippet
+	rc_snippet="${PACK_CONFIGS[$id].rc}"
+	[[ -z "$rc_snippet" ]] && return 0
+	# SECURITY: rc snippets execute in the current shell. Only source packages you trust.
+	PKG_DIR="$pkg_path" PKG_NAME="$id" eval "$rc_snippet" || print -u2 "pack: $id: rc snippet failed"
 }
 
 # ── Self-Registration ──────────────────────────────────────────────────────
 # pack manages itself as a package so `pack update pack` works
-PACK_REGISTRY[pack]="path=$PACK_SELF;source=${PACK_ORIGIN:-$PACK_SELF};branch=main;local=true;load=manual;disabled=false"
+PACK_REGISTRY[pack]=(
+	path="$PACK_SELF"
+	source="${PACK_ORIGIN:-$PACK_SELF}"
+	branch=main
+	tag=""
+	commit=""
+	local=true
+	load=manual
+	disabled=false
+	build=""
+	source_file=""
+	depends=""
+)
 PACK_LOADED[pack]=1
 
 # ── Read Configuration ────────────────────────────────────────────────────

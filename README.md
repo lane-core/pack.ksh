@@ -1,6 +1,6 @@
 # pack.ksh
 
-A declarative package manager for [ksh93u+m](https://github.com/ksh93/ksh). Nix-inspired, self-bootstrapping, XDG-compliant.
+A declarative package manager for [ksh93u+m](https://github.com/ksh93/ksh).
 
 Declare packages in your config, and pack handles cloning, dependency resolution (topological sort), loading, and version pinning.
 
@@ -40,23 +40,23 @@ pack "$HOME/dev/my-plugin" url=user/my-plugin fpath=functions  # local + remote 
 Then install:
 
 ```
-$ pack install
+pack install
 ```
 
 ## Commands
 
-| Command | Description |
-|---------------------|-----------------------------------------------|
-| `pack install [name]` | Install declared packages (all if no name) |
-| `pack update [name]` | Pull latest from git |
-| `pack remove <name>` | Remove a package |
-| `pack list` | Show all packages and their status |
-| `pack freeze` | Write lockfile (pin current commits) |
-| `pack restore` | Install from lockfile |
-| `pack info <name>` | Show package details |
-| `pack run [--pkg name] <cmd>` | Run command with package's PATH |
-| `pack diff` | Show changes since last freeze |
-| `pack self-update` | Update pack.ksh itself |
+| Command                       | Description                                |
+| ----------------------------- | ------------------------------------------ |
+| `pack install [name]`         | Install declared packages (all if no name) |
+| `pack update [name]`          | Pull latest from git                       |
+| `pack remove <name>`          | Remove a package                           |
+| `pack list`                   | Show all packages and their status         |
+| `pack freeze`                 | Write lockfile (pin current commits)       |
+| `pack restore`                | Install from lockfile                      |
+| `pack info <name>`            | Show package details                       |
+| `pack run [--pkg name] <cmd>` | Run command with package's PATH            |
+| `pack diff`                   | Show changes since last freeze             |
+| `pack self-update`            | Update pack.ksh itself                     |
 
 ## Package Declaration
 
@@ -64,24 +64,24 @@ $ pack install
 pack "<source>" [field=value ...]
 ```
 
-| Field | Type | Description |
-|-----------|---------|----------------------------------------------|
-| as | string | Override derived package name |
-| branch | string | Git branch to track |
-| tag | string | Git tag to pin |
-| commit | string | Git commit to pin |
-| url | string | Remote URL for a local package (enables update) |
-| local | bool | Treat source as a local path (auto-inferred from `/` paths) |
-| load | string | `now` (source on startup), `lazy` (default), `manual` |
-| build | string | Shell command to run after install/update |
-| disabled | bool | Register but don't install or load |
-| source | string | Override entry point filename |
-| fpath | array | Directories to add to FPATH and autoload |
-| path | array | Directories to prepend to PATH |
-| alias | array | Aliases to define (`name=value`) |
-| env | array | Environment variables to export (`KEY=value`) |
-| depends | array | Package names that must load first |
-| rc | string | Shell code evaluated after loading |
+| Field    | Type   | Description                                                 |
+| -------- | ------ | ----------------------------------------------------------- |
+| as       | string | Override derived package name                               |
+| branch   | string | Git branch to track                                         |
+| tag      | string | Git tag to pin                                              |
+| commit   | string | Git commit to pin                                           |
+| url      | string | Remote URL for a local package (enables update)             |
+| local    | bool   | Treat source as a local path (auto-inferred from `/` paths) |
+| load     | string | `now` (source on startup), `autoload` (default), `manual`   |
+| build    | string | Shell command to run after install/update                   |
+| disabled | bool   | Register but don't install or load                          |
+| entry    | string | Override entry point filename                               |
+| fpath    | array  | Directories to add to FPATH and autoload                    |
+| path     | array  | Directories to prepend to PATH                              |
+| alias    | array  | Aliases to define (`name=value`)                            |
+| env      | array  | Environment variables to export (`KEY=value`)               |
+| depends  | array  | Package names that must load first                          |
+| rc       | string | Shell code evaluated after loading                          |
 
 Source shorthand: `user/repo` expands to GitHub, `gl:user/repo` to GitLab, `bb:user/repo` to Bitbucket. Full URLs and local paths work as-is.
 
@@ -115,7 +115,7 @@ Entry point search order: `init.ksh` -> `plugin.ksh` -> `${name}.ksh`
 
 ## Security
 
-The `rc=` and `build=` fields execute arbitrary shell code. `rc=` runs every time a package loads; `build=` runs after install and update. Only install packages you trust. Same trust model as every other shell plugin manager.
+The `rc=`, `build=`, and `env=` fields execute arbitrary shell code or modify the shell environment. `rc=` runs every time a package loads; `build=` runs after install and update; `env=` exports variables into your session. Only install packages you trust. Same trust model as every other shell plugin manager.
 
 ## License
 

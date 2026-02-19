@@ -109,23 +109,24 @@ assert_true "getoptions registered in PACK_REGISTRY" '[[ -n "${PACK_REGISTRY[get
 assert_true "my-local-plugin registered in PACK_REGISTRY" '[[ -n "${PACK_REGISTRY[my-local-plugin]+set}" ]]'
 
 # Verify URL resolution: shorthand -> github URL
-typeset _v_rlf_meta="${PACK_REGISTRY[readlinkf]}"
-typeset _v_rlf_source="${_v_rlf_meta#*source=}"; _v_rlf_source="${_v_rlf_source%%;*}"
+typeset _v_rlf_source
+_v_rlf_source="${PACK_REGISTRY[readlinkf].source}"
 assert_true "readlinkf source expanded to github URL" '[[ "$_v_rlf_source" == "https://github.com/ko1nksm/readlinkf.git" ]]'
 
 # Verify as= rename worked
-typeset _v_geo_meta="${PACK_REGISTRY[getoptions]}"
-typeset _v_geo_source="${_v_geo_meta#*source=}"; _v_geo_source="${_v_geo_source%%;*}"
+typeset _v_geo_source
+_v_geo_source="${PACK_REGISTRY[getoptions].source}"
 assert_true "getoptions source is full URL" '[[ "$_v_geo_source" == "https://github.com/ko1nksm/getoptions.git" ]]'
 
 # Verify local package metadata
-typeset _v_lp_meta="${PACK_REGISTRY[my-local-plugin]}"
-typeset _v_lp_local="${_v_lp_meta#*local=}"; _v_lp_local="${_v_lp_local%%;*}"
+typeset _v_lp_local
+_v_lp_local="${PACK_REGISTRY[my-local-plugin].local}"
 assert_true "my-local-plugin marked as local" '[[ "$_v_lp_local" == true ]]'
 
 # Verify depends= stored in config
-typeset _v_lp_config="${PACK_CONFIGS[my-local-plugin]:-}"
-assert_true "my-local-plugin has depends in config" '[[ "$_v_lp_config" == *"depends=(readlinkf)"* ]]'
+typeset _v_lp_dep0
+_v_lp_dep0="${PACK_CONFIGS[my-local-plugin].depends[0]}"
+assert_true "my-local-plugin has depends in config" '[[ "$_v_lp_dep0" == "readlinkf" ]]'
 
 print ""
 

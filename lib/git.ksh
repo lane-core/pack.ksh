@@ -7,22 +7,20 @@ function _pack_git_clone {
     typeset url="$1" dest="$2" branch="$3" tag="$4" commit="$5"
     typeset out rc
 
-    if [[ -d "$dest" ]]; then
-        return 0
-    fi
+    [[ -d "$dest" ]] && return 0
 
     # Commit checkouts require full history (can't shallow-clone to arbitrary SHA)
     if [[ -n "$commit" ]]; then
         out=$(command git clone -- "$url" "$dest" 2>&1)
         rc=$?
         if (( rc != 0 )); then
-            print -u2 "pack: git clone failed: ${out}"
+            _pack_err $rc cmd "clone failed: ${out}" git-clone
             return 1
         fi
         out=$(command git -C "$dest" checkout "$commit" 2>&1)
         rc=$?
         if (( rc != 0 )); then
-            print -u2 "pack: git checkout ${commit} failed: ${out}"
+            _pack_err $rc cmd "checkout ${commit} failed: ${out}" git-checkout
             return 1
         fi
         return 0
@@ -46,7 +44,7 @@ function _pack_git_clone {
     out=$(command git clone --depth 1 --single-branch -- "$url" "$dest" 2>&1)
     rc=$?
     if (( rc != 0 )); then
-        print -u2 "pack: git clone failed: ${out}"
+        _pack_err $rc cmd "clone failed: ${out}" git-clone
         return 1
     fi
     return 0
@@ -59,7 +57,7 @@ function _pack_git_update {
     typeset out rc
 
     if [[ ! -d "${dest}/.git" ]]; then
-        print -u2 "pack: not a git repository: ${dest}"
+        _pack_err 1 io "not a git repository: ${dest}" git-update
         return 1
     fi
 
@@ -69,15 +67,19 @@ function _pack_git_update {
         [[ -z "$ref" ]] && ref="HEAD"
     fi
 
-    out=$(command git -C "$dest" fetch --depth 1 origin "$ref" 2>&1) || {
-        print -u2 "pack: fetch failed: ${out}"
+    out=$(command git -C "$dest" fetch --depth 1 origin "$ref" 2>&1)
+    rc=$?
+    if (( rc != 0 )); then
+        _pack_err $rc cmd "fetch failed: ${out}" git-fetch
         return 1
-    }
+    fi
 
-    out=$(command git -C "$dest" reset --hard FETCH_HEAD 2>&1) || {
-        print -u2 "pack: reset failed: ${out}"
+    out=$(command git -C "$dest" reset --hard FETCH_HEAD 2>&1)
+    rc=$?
+    if (( rc != 0 )); then
+        _pack_err $rc cmd "reset failed: ${out}" git-reset
         return 1
-    }
+    fi
 
     return 0
 }
@@ -86,11 +88,11 @@ function _pack_git_update {
 # Sets REPLY — no subshell needed by callers.
 
 function _pack_git_head {
-    REPLY=$(command git -C "$1" rev-parse --short HEAD 2>/dev/null)
+    REPLY=$(command git -C "$1" rev-parse --short HEAD 2>/dev/null) || { REPLY=""; return 1; }
 }
 
 function _pack_git_full_head {
-    REPLY=$(command git -C "$1" rev-parse HEAD 2>/dev/null)
+    REPLY=$(command git -C "$1" rev-parse HEAD 2>/dev/null) || { REPLY=""; return 1; }
 }
 
 # ── Remote HEAD ────────────────────────────────────────────────────────
@@ -120,7 +122,7 @@ function _pack_git_is_url {
        "$str" == git://*   || "$str" == git@*    ]] && return 0
 
     # GitHub-style shorthand: user/repo (contains slash, doesn't start with / or ~)
-    [[ "$str" == */* && "$str" != /* && "$str" != '~'* ]] && return 0
+    [[ "$str" == */* && "$str" != /* && "$str" != '~'* && "$str" != './'* && "$str" != '../'* ]] && return 0
 
     return 1
 }

@@ -2,44 +2,49 @@
 # Sourced by pack.ksh at startup; not intended for standalone execution.
 #
 # Hook points: pre-resolve post-resolve pre-install post-install
-#              pre-load post-load ready
+#              pre-load post-load ready package-disabled
 
-typeset -A _PACK_HOOKS
+typeset -C -A _PACK_HOOKS
 
 # ── Register ─────────────────────────────────────────────────────────
 # Usage: _pack_hook <hook> <func>
 function _pack_hook {
     typeset hook="$1" func="$2"
-    typeset -i count=${_PACK_HOOKS[${hook}:count]:-0}
-    typeset -i i
-    for (( i = 0; i < count; i++ )); do
-        [[ "${_PACK_HOOKS[${hook}:${i}]}" == "$func" ]] && return 0
+
+    # Initialize handler array if first registration for this hook
+    if [[ -z "${_PACK_HOOKS[$hook]+set}" ]]; then
+        _PACK_HOOKS[$hook]=(typeset -a handlers=())
+    fi
+
+    # Deduplicate: skip if already registered
+    typeset -i i n
+    n=${#_PACK_HOOKS[$hook].handlers[@]}
+    for (( i = 0; i < n; i++ )); do
+        [[ "${_PACK_HOOKS[$hook].handlers[i]}" == "$func" ]] && return 0
     done
-    _PACK_HOOKS[${hook}:${count}]="$func"
-    (( count++ ))
-    _PACK_HOOKS[${hook}:count]=$count
+
+    _PACK_HOOKS[$hook].handlers+=("$func")
 }
 
 # ── Unregister ───────────────────────────────────────────────────────
 # Usage: _pack_unhook <hook> <func>
 function _pack_unhook {
     typeset hook="$1" func="$2"
-    typeset -i count=${_PACK_HOOKS[${hook}:count]:-0}
-    (( count == 0 )) && return 0
-    typeset -i i j=0 found=0
-    for (( i = 0; i < count; i++ )); do
-        if [[ "${_PACK_HOOKS[${hook}:${i}]}" == "$func" ]]; then
-            unset "_PACK_HOOKS[${hook}:${i}]"
-            found=1
-        else
-            if (( found )); then
-                _PACK_HOOKS[${hook}:${j}]="${_PACK_HOOKS[${hook}:${i}]}"
-                unset "_PACK_HOOKS[${hook}:${i}]"
-            fi
-            (( j++ ))
-        fi
+
+    [[ -z "${_PACK_HOOKS[$hook]+set}" ]] && return 0
+    typeset -i n
+    n=${#_PACK_HOOKS[$hook].handlers[@]}
+    (( n == 0 )) && return 0
+
+    # Rebuild handlers array without the target
+    typeset -a new=()
+    typeset -i i
+    for (( i = 0; i < n; i++ )); do
+        [[ "${_PACK_HOOKS[$hook].handlers[i]}" != "$func" ]] && \
+            new+=("${_PACK_HOOKS[$hook].handlers[i]}")
     done
-    (( found )) && _PACK_HOOKS[${hook}:count]=$j
+
+    _PACK_HOOKS[$hook]=(typeset -a handlers=("${new[@]}"))
 }
 
 # ── Fire ─────────────────────────────────────────────────────────────
@@ -47,10 +52,14 @@ function _pack_unhook {
 # Errors from handlers go to stderr but don't halt iteration.
 function _pack_fire {
     typeset hook="$1"; shift
-    typeset -i count=${_PACK_HOOKS[${hook}:count]:-0}
-    (( count == 0 )) && return 0
+
+    [[ -z "${_PACK_HOOKS[$hook]+set}" ]] && return 0
+    typeset -i n
+    n=${#_PACK_HOOKS[$hook].handlers[@]}
+    (( n == 0 )) && return 0
+
     typeset -i i
-    for (( i = 0; i < count; i++ )); do
-        "${_PACK_HOOKS[${hook}:${i}]}" "$@" || true
+    for (( i = 0; i < n; i++ )); do
+        "${_PACK_HOOKS[$hook].handlers[i]}" "$@" || true
     done
 }

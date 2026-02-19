@@ -5,7 +5,7 @@
 # Sourced by pack.ksh at startup; not intended for standalone execution.
 
 # ── Scalar Reader ────────────────────────────────────────────────────
-# Read a single plaintext file into REPLY, trimming trailing whitespace.
+# Read a single plaintext file into REPLY.
 # Returns 1 if the file does not exist.
 function _pack_config_read_scalar {
 	typeset file="$1"
@@ -92,12 +92,9 @@ function _pack_config_read_pkg {
 
 	# Scalar fields — each maps directly to a key=value argument
 	typeset field
-	for field in branch tag commit as local load build disabled source_file rc url; do
+	for field in branch tag commit as local load build disabled entry rc url; do
 		_pack_config_read_scalar "$dir/$field" || continue
-		case "$field" in
-			source_file) args+=("source=$REPLY") ;;
-			*)           args+=("$field=$REPLY") ;;
-		esac
+		args+=("$field=$REPLY")
 	done
 
 	# Array fields — directory entries become (val1 val2 ...) syntax
