@@ -1,39 +1,26 @@
-# pack.ksh — Error accumulation for batch operations
+# pack.ksh — Error reporting for batch operations
 # Sourced by pack.ksh at startup; not intended for standalone execution.
+#
+# Error accumulation is done manually in callers (see functions/pack) —
+# subshell pool workers can't use gather/collect across process boundaries.
+# This file provides pack-specific formatting for the accumulated Result_t.
 
-typeset -C -A _PACK_ERRORS
-typeset -i _PACK_ERROR_COUNT=0
-
-# Record an error from RESULT into the keyed store.
-# Usage: _pack_error <name>   (reads RESULT for detail)
-function _pack_error {
-	typeset name="$1"
-	_PACK_ERRORS[$name]=(
-		code=${RESULT.code}
-		type="${RESULT.type}"
-		msg="${RESULT.msg}"
-		op="${RESULT.op}"
-	)
-	(( _PACK_ERROR_COUNT++ ))
-}
-
-# Clear all accumulated errors.
-function _pack_errors_clear {
-	_PACK_ERRORS=()
-	_PACK_ERROR_COUNT=0
-}
-
-# Print a summary of accumulated errors. Returns 1 if any errors exist.
-# This is a presentation layer — stderr output happens here, not in library code.
-function _pack_errors_report {
-	(( _PACK_ERROR_COUNT == 0 )) && return 0
+# Print a summary of accumulated errors from a Result_t accumulator.
+# Returns 1 if the accumulator has errors, 0 if ok.
+# Usage: _pack_report_errors acc_varname
+function _pack_report_errors {
+	typeset -n _pre_r=$1
+	[[ ${_pre_r.status} == ok ]] && return 0
 	print -u2 ""
-	print -u2 "pack: ${_PACK_ERROR_COUNT} error(s):"
-	typeset name eop emsg
-	for name in "${!_PACK_ERRORS[@]}"; do
-		eop="${_PACK_ERRORS[$name].op}"
-		emsg="${_PACK_ERRORS[$name].msg}"
-		print -u2 "  [${eop}] ${name}: ${emsg}"
+	print -u2 "pack: ${_pre_r.code} error(s):"
+	typeset _pre_line
+	typeset _pre_IFS=$IFS
+	IFS=$'\n'
+	set -o noglob
+	for _pre_line in ${_pre_r.error}; do
+		print -u2 "  $_pre_line"
 	done
+	set +o noglob
+	IFS=$_pre_IFS
 	return 1
 }

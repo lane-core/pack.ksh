@@ -1,90 +1,69 @@
 #!/bin/ksh
 # pack.ksh — Dependency resolution
-# Topological sort via Kahn's algorithm.
-# Reads PACK_REGISTRY + PACK_CONFIGS, writes PACK_ORDER.
+# Builds adjacency map from PACK_REGISTRY + PACK_CONFIGS, delegates
+# topological sort to func.ksh's toposort. Writes PACK_ORDER.
 
-# ── Topological Sort ──────────────────────────────────────────────────
-# Resolve package load order from dependency declarations.
-# Skips disabled packages. Detects cycles.
 function _pack_resolve {
     PACK_ORDER=()
 
-    typeset -A in_degree
-    typeset -A adj_list
+    # Build adjacency map: _pr_deps[name] = space-separated dependencies
+    typeset -A _pr_deps
 
-    # Seed every registered, non-disabled package as a graph node
-    typeset name
-    for name in "${!PACK_REGISTRY[@]}"; do
-        [[ "${PACK_REGISTRY[$name].disabled}" == true ]] && continue
-        in_degree[$name]=0
-        adj_list[$name]=""
+    # Register every non-disabled package as a graph node
+    typeset _pr_name
+    for _pr_name in "${!PACK_REGISTRY[@]}"; do
+        [[ "${PACK_REGISTRY[$_pr_name].disabled}" == true ]] && continue
+        _pr_deps[$_pr_name]=""
     done
 
     # Build edges from depends fields in PACK_CONFIGS.
-    # If A depends on B, edge B->A (B must load before A).
-    typeset dep bare want actual
-    typeset -i _ndeps _di
-    for name in "${!in_degree[@]}"; do
-        [[ -z "${PACK_CONFIGS[$name]+set}" ]] && continue
-        _ndeps=${#PACK_CONFIGS[$name].depends[@]}
-        (( _ndeps == 0 )) && continue
+    # Version constraint warnings are pack-specific (handled here before toposort).
+    typeset _pr_dep _pr_bare _pr_want _pr_actual _pr_dep_list
+    typeset -i _pr_ndeps _pr_di
+    for _pr_name in "${!_pr_deps[@]}"; do
+        [[ -z "${PACK_CONFIGS[$_pr_name]+set}" ]] && continue
+        _pr_ndeps=${#PACK_CONFIGS[$_pr_name].depends[@]}
+        (( _pr_ndeps == 0 )) && continue
 
-        for (( _di = 0; _di < _ndeps; _di++ )); do
-            dep="${PACK_CONFIGS[$name].depends[_di]}"
+        _pr_dep_list=""
+        for (( _pr_di = 0; _pr_di < _pr_ndeps; _pr_di++ )); do
+            _pr_dep="${PACK_CONFIGS[$_pr_name].depends[_pr_di]}"
+
             # Version constraint: depends=(foo@v1.0) → bare=foo, want=v1.0
-            bare="$dep" want=""
-            if [[ "$dep" == *'@'* ]]; then
-                bare="${dep%%'@'*}"
-                want="${dep#*'@'}"
-                if [[ -n "${PACK_REGISTRY[$bare]+set}" && -n "$want" ]]; then
-                    actual="${PACK_REGISTRY[$bare].tag:-}"
-                    if [[ "$actual" != "$want" ]]; then
-                        print -u2 "pack: ${name} depends on ${dep} but ${bare} is declared with tag=${actual}"
+            _pr_bare="$_pr_dep"
+            _pr_want=""
+            if [[ "$_pr_dep" == *'@'* ]]; then
+                _pr_bare="${_pr_dep%%'@'*}"
+                _pr_want="${_pr_dep#*'@'}"
+                if [[ -n "${PACK_REGISTRY[$_pr_bare]+set}" && -n "$_pr_want" ]]; then
+                    _pr_actual="${PACK_REGISTRY[$_pr_bare].tag:-}"
+                    if [[ "$_pr_actual" != "$_pr_want" ]]; then
+                        print -u2 "pack: ${_pr_name} depends on ${_pr_dep} but ${_pr_bare} is declared with tag=${_pr_actual}"
                     fi
                 fi
-                dep="$bare"
+                _pr_dep="$_pr_bare"
             fi
 
-            if [[ -z "${in_degree[$dep]+set}" ]]; then
-                print -u2 "pack: warning: ${name} depends on '${dep}' which is not declared"
+            # Only include deps that are declared, non-disabled packages
+            if [[ -z "${_pr_deps[$_pr_dep]+set}" ]]; then
+                print -u2 "pack: warning: ${_pr_name} depends on '${_pr_dep}' which is not declared"
                 continue
             fi
 
-            adj_list[$dep]="${adj_list[$dep]:+${adj_list[$dep]} }${name}"
-            (( in_degree[$name]++ ))
+            _pr_dep_list+="${_pr_dep_list:+ }$_pr_dep"
         done
+        _pr_deps[$_pr_name]="$_pr_dep_list"
     done
 
-    # ── Kahn's algorithm ──────────────────────────────────────────────
-    # Collect zero-degree nodes as the initial queue
-    typeset -a queue
-    typeset node
-    for node in "${!in_degree[@]}"; do
-        (( in_degree[$node] == 0 )) && queue+=("$node")
-    done
-
-    typeset -a result
-    typeset current neighbor
-    while (( ${#queue[@]} > 0 )); do
-        current="${queue[0]}"
-        queue=("${queue[@]:1}")
-        result+=("$current")
-
-        for neighbor in ${adj_list[$current]}; do
-            (( in_degree[$neighbor]-- ))
-            (( in_degree[$neighbor] == 0 )) && queue+=("$neighbor")
-        done
-    done
-
-    # ── Cycle detection ───────────────────────────────────────────────
-    if (( ${#result[@]} != ${#in_degree[@]} )); then
-        print -u2 "pack: cycle detected among:"
-        for node in "${!in_degree[@]}"; do
-            (( in_degree[$node] > 0 )) && print -u2 "  ${node}"
-        done
-        _pack_err 1 resolve "dependency cycle detected in package graph" resolve
+    # Delegate to func.ksh toposort
+    Result_t _pr_result
+    toposort _pr_result _pr_deps
+    if _pr_result.is_err; then
+        print -u2 "pack: ${_pr_result.error}"
         return 1
     fi
 
-    PACK_ORDER=("${result[@]}")
+    # Convert space-separated result to array
+    # Glob-safe: pack() rejects names with glob chars at declaration time
+    PACK_ORDER=( ${_pr_result.value} )
 }

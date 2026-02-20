@@ -42,7 +42,7 @@ for _pack_l_name in "${PACK_ORDER[@]}"; do
 		if _pack_git_is_url "$_pack_l_source"; then
 			_pack_git_clone "$_pack_l_source" "$_pack_l_path" \
 				"$_pack_l_branch" "$_pack_l_tag" "$_pack_l_commit" || {
-				print -u2 "pack: ${_pack_l_name}: ${RESULT.msg}"
+				print -u2 "pack: ${_pack_l_name}: ${REPLY}"
 				(( _pack_l_fail++ ))
 				continue
 			}

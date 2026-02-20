@@ -23,23 +23,18 @@ for _pack_dir in "$PACK_PACKAGES" "$PACK_STATE_DIR" "$PACK_CACHE"; do
 done
 unset _pack_dir
 
+# ── func.ksh — safe shell primitives ─────────────────────────────────────────
+. "${PACK_SELF}/../func.ksh/init.ksh" || {
+	print -u2 "pack: failed to source func.ksh"
+	return 1
+}
+
 # ── Data Structures ──────────────────────────────────────────────────────────
 typeset -C -A PACK_REGISTRY  # name -> compound: path, source, branch, tag, commit, local, load, disabled, build, source_file, depends
 typeset -C -A PACK_CONFIGS   # name -> compound: fpath[], path[], depends[], alias[], env[], rc
 typeset -C -A PACK_STATE     # name -> compound: commit, timestamp
 typeset -A PACK_LOADED       # name -> 1 (prevents double-load) -- stays flat
 typeset -a PACK_ORDER        # resolved load order -- stays flat
-
-# ── Result Type ─────────────────────────────────────────────────────────────
-# Structured error channel. Success is return 0 (with REPLY for values).
-# RESULT carries detail when functions return 1. Field-by-field assignment
-# preserves typeset -i on code; never reassign RESULT as a whole compound.
-typeset -C RESULT=(typeset -i code=0; typeset type=""; typeset msg=""; typeset op="")
-
-function _pack_err {
-	RESULT.code=${1}; RESULT.type="${2}"; RESULT.msg="${3}"; RESULT.op="${4}"
-	return 1
-}
 
 # ── Pipeline / Functor ──────────────────────────────────────────────────────
 # Iterate packages with optional filter. Uses PACK_ORDER if populated,
@@ -55,7 +50,7 @@ _pack_each() {
 	else
 		for name in "${!PACK_REGISTRY[@]}"; do
 			# Guard against phantom keys left by unset on compound-associative
-			[[ -z "${PACK_REGISTRY[$name].path:-}" && "${PACK_REGISTRY[$name].disabled:-}" != true ]] && continue
+			[[ -z "${PACK_REGISTRY[$name].path:-}" && -z "${PACK_REGISTRY[$name].disabled:-}" ]] && continue
 			[[ -n "$filter" ]] && { "$filter" "$name" || continue; }
 			"$callback" "$name"
 		done

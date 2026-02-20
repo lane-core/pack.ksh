@@ -23,8 +23,10 @@ function _pack_stamp {
 # Usage: _pack_pool <rc_assoc_array_name> <dir_var_name> <worker_func> name...
 # Caller declares the associative array and dir variable; pool writes via nameref.
 # Caller is responsible for removing the tmpdir.
+#
+# Stays outside func.ksh's abstraction: subshells break Result_t's nameref model.
 function _pack_pool {
-	nameref pool_rc="$1" pool_dir="$2"
+	typeset -n pool_rc="$1" pool_dir="$2"
 	typeset worker="$3"; shift 3
 	typeset -a queue=("$@")
 	typeset -i total=${#queue[@]} active=0 next=0
@@ -101,7 +103,7 @@ function _pack_cmd_install {
 	typeset -a names=("${@:-${!PACK_REGISTRY[@]}}")
 	typeset -a queue
 	typeset name
-	_pack_errors_clear
+	Result_t _pci_acc
 
 	# No packages declared (only self-registered 'pack')
 	if (( $# == 0 && ${#names[@]} <= 1 )); then
@@ -134,21 +136,28 @@ function _pack_cmd_install {
 		_pack_pool _pack_rc _pack_tmpdir _pack_install_worker "${queue[@]}"
 	fi
 
-	# ── Finish ──
+	# Protect tmpdir from signal-induced leak
+	[[ -n "$_pack_tmpdir" ]] && trap 'rm -rf "$_pack_tmpdir" 2>/dev/null' INT TERM
+
+	# ── Finish — gather per-item results into accumulator ──
 	typeset -i rc
 	for name in "${queue[@]}"; do
 		rc=${_pack_rc[$name]:-1}
 		typeset dir
 		dir="${PACK_REGISTRY[$name].path}"
 		if (( rc != 0 )); then
-			# Pool path: RESULT lost across subshell boundary, reconstruct
-			if [[ -n "$_pack_tmpdir" ]]; then
-				RESULT.code=1; RESULT.type=cmd; RESULT.op=install
-				RESULT.msg="install failed"
-				[[ -f "$_pack_tmpdir/$name.log" ]] && RESULT.msg="$(< "$_pack_tmpdir/$name.log")"
+			typeset _pci_msg="install failed"
+			# Pool path: read error detail from log file
+			if [[ -n "$_pack_tmpdir" && -f "$_pack_tmpdir/$name.log" ]]; then
+				_pci_msg="$(< "$_pack_tmpdir/$name.log")"
 			fi
-			# Single-process path: RESULT already set by worker
-			_pack_error "$name"
+			# Fold error into accumulator
+			if _pci_acc.is_ok; then
+				_pci_acc.err "${name}: ${_pci_msg}" 1
+			else
+				_pci_acc.error="${_pci_acc.error}"$'\n'"${name}: ${_pci_msg}"
+				_pci_acc.code=$(( ${_pci_acc.code} + 1 ))
+			fi
 			continue
 		fi
 		_pack_run_build "$name" "$dir" || continue
@@ -159,9 +168,10 @@ function _pack_cmd_install {
 	# ── Cleanup ──
 	if [[ -n "$_pack_tmpdir" ]]; then
 		rm -rf "$_pack_tmpdir"
+		trap - INT TERM
 	fi
 
-	_pack_errors_report
+	_pack_report_errors _pci_acc
 }
 
 # ── update ───────────────────────────────────────────────────────────────────
@@ -170,7 +180,7 @@ function _pack_cmd_update {
 	typeset -a queue
 	typeset -A old_heads
 	typeset name
-	_pack_errors_clear
+	Result_t _pcu_acc
 
 	# ── Collect ──
 	for name in "${names[@]}"; do
@@ -202,6 +212,9 @@ function _pack_cmd_update {
 		_pack_pool _pack_rc _pack_tmpdir _pack_update_worker "${queue[@]}"
 	fi
 
+	# Protect tmpdir from signal-induced leak
+	[[ -n "$_pack_tmpdir" ]] && trap 'rm -rf "$_pack_tmpdir" 2>/dev/null' INT TERM
+
 	# ── Finish ──
 	typeset -i rc
 	for name in "${queue[@]}"; do
@@ -209,19 +222,29 @@ function _pack_cmd_update {
 		typeset dir
 		dir="${PACK_REGISTRY[$name].path}"
 		if (( rc != 0 )); then
-			# Pool path: RESULT lost across subshell boundary, reconstruct
-			if [[ -n "$_pack_tmpdir" ]]; then
-				RESULT.code=1; RESULT.type=cmd; RESULT.op=update
-				RESULT.msg="update failed"
-				[[ -f "$_pack_tmpdir/$name.log" ]] && RESULT.msg="$(< "$_pack_tmpdir/$name.log")"
+			typeset _pcu_msg="update failed"
+			if [[ -n "$_pack_tmpdir" && -f "$_pack_tmpdir/$name.log" ]]; then
+				_pcu_msg="$(< "$_pack_tmpdir/$name.log")"
 			fi
-			# Single-process path: RESULT already set by worker
-			_pack_error "$name"
+			if _pcu_acc.is_ok; then
+				_pcu_acc.err "${name}: ${_pcu_msg}" 1
+			else
+				_pcu_acc.error="${_pcu_acc.error}"$'\n'"${name}: ${_pcu_msg}"
+				_pcu_acc.code=$(( ${_pcu_acc.code} + 1 ))
+			fi
 			continue
 		fi
 		_pack_git_head "$dir"
 		if [[ "$REPLY" != "${old_heads[$name]}" ]]; then
-			_pack_run_build "$name" "$dir"
+			_pack_run_build "$name" "$dir" || {
+				if _pcu_acc.is_ok; then
+					_pcu_acc.err "${name}: build failed" 1
+				else
+					_pcu_acc.error="${_pcu_acc.error}"$'\n'"${name}: build failed"
+					_pcu_acc.code=$(( ${_pcu_acc.code} + 1 ))
+				fi
+				continue
+			}
 			_pack_stamp "$dir" "$name"
 			print "pack: $name updated (${old_heads[$name]} -> $REPLY)"
 		else
@@ -232,9 +255,10 @@ function _pack_cmd_update {
 	# ── Cleanup ──
 	if [[ -n "$_pack_tmpdir" ]]; then
 		rm -rf "$_pack_tmpdir"
+		trap - INT TERM
 	fi
 
-	_pack_errors_report
+	_pack_report_errors _pcu_acc
 }
 
 # ── remove ───────────────────────────────────────────────────────────────────
@@ -467,14 +491,16 @@ function _pack_cmd_run {
 	typeset pkg_path
 	pkg_path="${PACK_REGISTRY[$name].path}"
 	typeset new_path="$PATH"
-	typeset -i _ri _rn
-	_rn=${#PACK_CONFIGS[$name].path[@]}
-	typeset dir
-	for (( _ri = 0; _ri < _rn; _ri++ )); do
-		dir="${PACK_CONFIGS[$name].path[_ri]}"
-		if [[ "$dir" == /* ]]; then new_path="$dir:$new_path"
-		else new_path="$pkg_path/$dir:$new_path"; fi
-	done
+	if [[ -n "${PACK_CONFIGS[$name]+set}" ]]; then
+		typeset -i _ri _rn
+		_rn=${#PACK_CONFIGS[$name].path[@]}
+		typeset dir
+		for (( _ri = 0; _ri < _rn; _ri++ )); do
+			dir="${PACK_CONFIGS[$name].path[_ri]}"
+			if [[ "$dir" == /* ]]; then new_path="$dir:$new_path"
+			else new_path="$pkg_path/$dir:$new_path"; fi
+		done
+	fi
 	( PATH="$new_path" "$@" )
 }
 

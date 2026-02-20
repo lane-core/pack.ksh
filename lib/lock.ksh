@@ -11,35 +11,36 @@ function _pack_lock_path {
 # is recorded with its full commit hash so that pack_restore can recreate
 # the exact environment later.
 # POSIX-style function: shares caller's scope via _pack_each.
-# Expects from pack_freeze: ts, count, source, pkg_path
+# Expects from pack_freeze: _pf_ts, _pf_count
 _pack_freeze_entry() {
     typeset name="$1"
-    source="${PACK_REGISTRY[$name].source}"
-    [[ -z "$source" ]] && return 0
+    typeset _pfe_source _pfe_path
+    _pfe_source="${PACK_REGISTRY[$name].source}"
+    [[ -z "$_pfe_source" ]] && return 0
 
-    pkg_path="${PACK_REGISTRY[$name].path}"
+    _pfe_path="${PACK_REGISTRY[$name].path}"
 
     # Only freeze packages that are actually cloned
-    [[ -d "${pkg_path}/.git" ]] || return 0
+    [[ -d "${_pfe_path}/.git" ]] || return 0
 
-    _pack_git_full_head "$pkg_path"
+    _pack_git_full_head "$_pfe_path"
     [[ -z "$REPLY" ]] && {
         print -u2 "pack: warning: could not read HEAD for ${name}"
         return 0
     }
 
     print -u2 "pack: freeze: ${name} (${REPLY:0:7})"
-    print "${name}|${source}|${REPLY}|${ts}"
-    (( count++ ))
+    print "${name}|${_pfe_source}|${REPLY}|${_pf_ts}"
+    (( _pf_count++ ))
 }
 
 function pack_freeze {
     _pack_lock_path
     typeset lockfile="$REPLY"
-    typeset -i count=0
-    typeset ts source pkg_path
+    typeset -i _pf_count=0
+    typeset _pf_ts
 
-    ts=$(date -u +%Y-%m-%dT%H:%M:%S) || {
+    _pf_ts=$(date -u +%Y-%m-%dT%H:%M:%S) || {
         print -u2 "pack: could not determine timestamp"
         return 1
     }
@@ -51,7 +52,7 @@ function pack_freeze {
         _pack_each _pack_freeze_entry _pack_filter_remote
     } > "$lockfile"
 
-    print "pack: frozen ${count} package(s) to ${lockfile}"
+    print "pack: frozen ${_pf_count} package(s) to ${lockfile}"
 }
 
 # ── Restore ───────────────────────────────────────────────────────────
@@ -66,30 +67,36 @@ function pack_restore {
         return 1
     }
 
-    typeset -i count=0
-    typeset line name source commit ts
-    _pack_errors_clear
+    typeset -i _prs_count=0
+    typeset _prs_line _prs_name _prs_source _prs_commit _prs_ts
+    Result_t _prs_acc
 
-    while IFS='|' read -r name source commit ts; do
+    while IFS='|' read -r _prs_name _prs_source _prs_commit _prs_ts; do
         # Skip comments and blank lines
-        [[ "$name" == '#'* || -z "$name" ]] && continue
+        [[ "$_prs_name" == '#'* || -z "$_prs_name" ]] && continue
 
-        typeset dest="$PACK_PACKAGES/$name"
+        typeset _prs_dest="$PACK_PACKAGES/$_prs_name"
 
-        if [[ -d "$dest" ]]; then
-            print "pack: ${name} already present, skipping"
+        if [[ -d "$_prs_dest" ]]; then
+            print "pack: ${_prs_name} already present, skipping"
         else
-            _pack_git_clone "$source" "$dest" "" "" "$commit" || {
-                _pack_error "$name"
+            _pack_git_clone "$_prs_source" "$_prs_dest" "" "" "$_prs_commit" || {
+                # Fold into accumulator
+                if _prs_acc.is_ok; then
+                    _prs_acc.err "${_prs_name}: ${REPLY}" 1
+                else
+                    _prs_acc.error="${_prs_acc.error}"$'\n'"${_prs_name}: ${REPLY}"
+                    _prs_acc.code=$(( ${_prs_acc.code} + 1 ))
+                fi
                 continue
             }
         fi
 
-        PACK_STATE[$name]=(commit="$commit" timestamp="$ts")
-        (( count++ ))
+        PACK_STATE[$_prs_name]=(commit="$_prs_commit" timestamp="$_prs_ts")
+        (( _prs_count++ ))
     done < "$lockfile"
 
-    print "pack: restored ${count} package(s) from lockfile"
-    _pack_errors_report
+    print "pack: restored ${_prs_count} package(s) from lockfile"
+    _pack_report_errors _prs_acc
     return $?
 }
