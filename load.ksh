@@ -40,12 +40,14 @@ for _pack_l_name in "${PACK_ORDER[@]}"; do
 	_pack_fire pre-install "$_pack_l_name"
 	if [[ ! -d "$_pack_l_path" ]]; then
 		if _pack_git_is_url "$_pack_l_source"; then
-			_pack_git_clone "$_pack_l_source" "$_pack_l_path" \
-				"$_pack_l_branch" "$_pack_l_tag" "$_pack_l_commit" || {
-				print -u2 "pack: ${_pack_l_name}: ${REPLY}"
+			Result_t _pack_l_cr
+			_pack_git_clone _pack_l_cr "$_pack_l_source" "$_pack_l_path" \
+				"$_pack_l_branch" "$_pack_l_tag" "$_pack_l_commit"
+			if _pack_l_cr.is_err; then
+				print -u2 "pack: ${_pack_l_name}: ${_pack_l_cr.error}"
 				(( _pack_l_fail++ ))
 				continue
-			}
+			fi
 		elif [[ "$_pack_l_local" != true ]]; then
 			print -u2 "pack: $_pack_l_name: package directory missing: $_pack_l_path"
 			(( _pack_l_fail++ ))
@@ -102,3 +104,4 @@ done
 unset _pack_l_name _pack_l_path _pack_l_source
 unset _pack_l_branch _pack_l_tag _pack_l_commit
 unset _pack_l_load _pack_l_disabled _pack_l_local _pack_l_entry _pack_l_sf _pack_l_fail
+unset _pack_l_cr

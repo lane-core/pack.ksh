@@ -77,6 +77,7 @@ function _pack_pool {
 
 # ── Install Worker ───────────────────────────────────────────────────────────
 # Runs in subshell — stdout/stderr redirected to log by _pack_pool.
+# Creates a local Result_t; the pool captures exit code + log output.
 function _pack_install_worker {
 	typeset name="$1"
 	typeset src dir br tag commit
@@ -85,7 +86,12 @@ function _pack_install_worker {
 	br="${PACK_REGISTRY[$name].branch}"
 	tag="${PACK_REGISTRY[$name].tag}"
 	commit="${PACK_REGISTRY[$name].commit}"
-	_pack_git_clone "$src" "$dir" "$br" "$tag" "$commit"
+	Result_t _piw_r
+	_pack_git_clone _piw_r "$src" "$dir" "$br" "$tag" "$commit"
+	if _piw_r.is_err; then
+		print -u2 "${_piw_r.error}"
+		return 1
+	fi
 }
 
 # ── Update Worker ────────────────────────────────────────────────────────────
@@ -95,7 +101,12 @@ function _pack_update_worker {
 	typeset dir br
 	dir="${PACK_REGISTRY[$name].path}"
 	br="${PACK_REGISTRY[$name].branch}"
-	_pack_git_update "$dir" "$br"
+	Result_t _puw_r
+	_pack_git_update _puw_r "$dir" "$br"
+	if _puw_r.is_err; then
+		print -u2 "${_puw_r.error}"
+		return 1
+	fi
 }
 
 # ── install ──────────────────────────────────────────────────────────────────
@@ -147,17 +158,10 @@ function _pack_cmd_install {
 		dir="${PACK_REGISTRY[$name].path}"
 		if (( rc != 0 )); then
 			typeset _pci_msg="install failed"
-			# Pool path: read error detail from log file
 			if [[ -n "$_pack_tmpdir" && -f "$_pack_tmpdir/$name.log" ]]; then
 				_pci_msg="$(< "$_pack_tmpdir/$name.log")"
 			fi
-			# Fold error into accumulator
-			if _pci_acc.is_ok; then
-				_pci_acc.err "${name}: ${_pci_msg}" 1
-			else
-				_pci_acc.error="${_pci_acc.error}"$'\n'"${name}: ${_pci_msg}"
-				_pci_acc.code=$(( ${_pci_acc.code} + 1 ))
-			fi
+			_pack_accum_err _pci_acc "${name}: ${_pci_msg}"
 			continue
 		fi
 		_pack_run_build "$name" "$dir" || continue
@@ -226,23 +230,13 @@ function _pack_cmd_update {
 			if [[ -n "$_pack_tmpdir" && -f "$_pack_tmpdir/$name.log" ]]; then
 				_pcu_msg="$(< "$_pack_tmpdir/$name.log")"
 			fi
-			if _pcu_acc.is_ok; then
-				_pcu_acc.err "${name}: ${_pcu_msg}" 1
-			else
-				_pcu_acc.error="${_pcu_acc.error}"$'\n'"${name}: ${_pcu_msg}"
-				_pcu_acc.code=$(( ${_pcu_acc.code} + 1 ))
-			fi
+			_pack_accum_err _pcu_acc "${name}: ${_pcu_msg}"
 			continue
 		fi
 		_pack_git_head "$dir"
 		if [[ "$REPLY" != "${old_heads[$name]}" ]]; then
 			_pack_run_build "$name" "$dir" || {
-				if _pcu_acc.is_ok; then
-					_pcu_acc.err "${name}: build failed" 1
-				else
-					_pcu_acc.error="${_pcu_acc.error}"$'\n'"${name}: build failed"
-					_pcu_acc.code=$(( ${_pcu_acc.code} + 1 ))
-				fi
+				_pack_accum_err _pcu_acc "${name}: build failed"
 				continue
 			}
 			_pack_stamp "$dir" "$name"

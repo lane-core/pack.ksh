@@ -80,16 +80,12 @@ function pack_restore {
         if [[ -d "$_prs_dest" ]]; then
             print "pack: ${_prs_name} already present, skipping"
         else
-            _pack_git_clone "$_prs_source" "$_prs_dest" "" "" "$_prs_commit" || {
-                # Fold into accumulator
-                if _prs_acc.is_ok; then
-                    _prs_acc.err "${_prs_name}: ${REPLY}" 1
-                else
-                    _prs_acc.error="${_prs_acc.error}"$'\n'"${_prs_name}: ${REPLY}"
-                    _prs_acc.code=$(( ${_prs_acc.code} + 1 ))
-                fi
+            Result_t _prs_cr
+            _pack_git_clone _prs_cr "$_prs_source" "$_prs_dest" "" "" "$_prs_commit"
+            if _prs_cr.is_err; then
+                _pack_accum_err _prs_acc "${_prs_name}: ${_prs_cr.error}"
                 continue
-            }
+            fi
         fi
 
         PACK_STATE[$_prs_name]=(commit="$_prs_commit" timestamp="$_prs_ts")
