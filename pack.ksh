@@ -139,7 +139,7 @@ function _pack_derive_name {
 function pack {
 	# ── CLI subcommands ──────────────────────────────────────────────────
 	case "${1:-}" in
-		install|update|remove|list|freeze|restore|info|path|run|diff|self-update|version|help|-h|--help)
+		install|update|remove|list|freeze|restore|info|path|run|diff|doctor|self-update|version|help|-h|--help)
 			# Lazy-load CLI handlers from functions/pack
 			if ! typeset -f _pack_cmd_help >/dev/null 2>&1; then
 				. "$PACK_SELF/functions/pack" || return 1
@@ -156,6 +156,7 @@ function pack {
 				path)        _pack_cmd_path "$@" ;;
 				run)         _pack_cmd_run "$@" ;;
 				diff)        _pack_cmd_diff ;;
+				doctor)      _pack_cmd_doctor "$@" ;;
 				self-update) _pack_cmd_self_update ;;
 				version)     _pack_cmd_version ;;
 				help|-h|--help) _pack_cmd_help ;;

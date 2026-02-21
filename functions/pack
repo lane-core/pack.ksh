@@ -422,6 +422,7 @@ Commands:
   path    <name>          Print package root directory
   run     [--pkg] <name> <cmd>  Run command with package'\''s PATH
   diff                    Show changes since last freeze
+  doctor  [--fix]         Diagnose and repair broken installations
   self-update             Update pack.ksh itself
   version                 Show pack.ksh version info
   help                    Show this message
@@ -546,4 +547,295 @@ function _pack_cmd_diff {
 	else
 		print "${diff_changed} changed, ${diff_clean} unchanged."
 	fi
+}
+
+# ── doctor ───────────────────────────────────────────────────────────────────
+# Diagnose and repair broken installations.
+#
+# All check helpers are POSIX-style so they share _pack_cmd_doctor's scope
+# (counters _doc_ok/_doc_warn/_doc_fail/_doc_repaired, flag _doc_fix).
+# Only _pack_doctor_repair_clone uses function-keyword (needs local Result_t).
+
+# Clone helper for repair operations — function-keyword keeps Result_t local.
+function _pack_doctor_repair_clone {
+	typeset _pdrc_name="$1" _pdrc_src="$2" _pdrc_dest="$3"
+	Result_t _pdrc_r
+	_pack_git_clone _pdrc_r "$_pdrc_src" "$_pdrc_dest" \
+		"${PACK_REGISTRY[$_pdrc_name].branch}" \
+		"${PACK_REGISTRY[$_pdrc_name].tag}" \
+		"${PACK_REGISTRY[$_pdrc_name].commit}"
+	if _pdrc_r.is_ok; then
+		print "    ✓ recloned"
+		return 0
+	else
+		print -u2 "    ✗ reclone failed: ${_pdrc_r.error}"
+		return 1
+	fi
+}
+
+# Check 1: ksh version
+_pack_doctor_ksh() {
+	if [[ "${.sh.version}" == *93u+m* ]]; then
+		typeset _pdk_ver="${.sh.version##*' '}"
+		print "  ✓ ksh $_pdk_ver"
+		(( _doc_ok++ ))
+	else
+		print "  ✗ ksh — found ${.sh.version}, need 93u+m"
+		typeset _pdk_path
+		_pdk_path=$(command -v ksh 2>/dev/null)
+		[[ -n "$_pdk_path" ]] && print "    binary: $_pdk_path"
+		(( _doc_fail++ ))
+	fi
+}
+
+# Check 2: func.ksh dependency
+_pack_doctor_func() {
+	typeset -i _pdf_checks=0 _pdf_passed=0
+
+	(( _pdf_checks++ ))
+	[[ -n "${_FUNC_KSH_INIT:-}" ]] && (( _pdf_passed++ ))
+
+	(( _pdf_checks++ ))
+	[[ -d "${_FUNC_KSH_ASYNC_DIR:-/nonexistent}" ]] && (( _pdf_passed++ ))
+
+	(( _pdf_checks++ ))
+	if Future_t _pdf_test 2>/dev/null; then
+		unset _pdf_test
+		(( _pdf_passed++ ))
+	fi
+
+	if (( _pdf_passed == _pdf_checks )); then
+		print "  ✓ func.ksh loaded (async: ok)"
+		(( _doc_ok++ ))
+		return
+	fi
+
+	print "  ✗ func.ksh — ${_pdf_passed}/${_pdf_checks} checks passed"
+	typeset _pdf_dir="${PACK_SELF}/../func.ksh"
+
+	if [[ ! -d "$_pdf_dir" ]] || [[ ! -d "$_pdf_dir/.git" ]]; then
+		typeset _pdf_src=""
+		[[ -n "${PACK_REGISTRY[func.ksh]+set}" ]] && _pdf_src="${PACK_REGISTRY[func.ksh].source}"
+		if [[ -n "$_pdf_src" ]] && _pack_git_is_url "$_pdf_src"; then
+			typeset _pdf_ans
+			if [[ "$_doc_fix" == true ]]; then
+				_pdf_ans=y
+			else
+				print -n "    → reclone func.ksh from ${_pdf_src}? [y/N] "
+				read -r _pdf_ans
+			fi
+			if [[ "$_pdf_ans" == [yY] ]]; then
+				[[ -n "$_pdf_dir" && -d "$_pdf_dir" ]] && command rm -rf "$_pdf_dir"
+				if command git clone --depth 1 --single-branch -- "$_pdf_src" "$_pdf_dir" >/dev/null 2>&1; then
+					print "    ✓ recloned (restart shell to load)"
+					(( _doc_repaired++ ))
+				else
+					print -u2 "    ✗ reclone failed"
+					(( _doc_fail++ ))
+				fi
+			else
+				(( _doc_fail++ ))
+			fi
+		else
+			print "    manual fix: clone func.ksh to ${_pdf_dir}"
+			(( _doc_fail++ ))
+		fi
+	else
+		(( _doc_fail++ ))
+	fi
+}
+
+# Check 3: PACK_ROOT directory structure
+_pack_doctor_dirs() {
+	typeset -i _pdd_missing=0
+	typeset _pdd_dir
+	for _pdd_dir in "$PACK_PACKAGES" "$PACK_STATE_DIR" "$PACK_CACHE"; do
+		[[ -d "$_pdd_dir" ]] || (( _pdd_missing++ ))
+	done
+
+	if (( _pdd_missing == 0 )); then
+		print "  ✓ directory structure"
+		(( _doc_ok++ ))
+	else
+		print "  ✗ directory structure — ${_pdd_missing} dir(s) missing"
+		typeset _pdd_ans
+		if [[ "$_doc_fix" == true ]]; then
+			_pdd_ans=y
+		else
+			print -n "    → create missing directories? [y/N] "
+			read -r _pdd_ans
+		fi
+		if [[ "$_pdd_ans" == [yY] ]]; then
+			mkdir -p "$PACK_PACKAGES" "$PACK_STATE_DIR" "$PACK_CACHE"
+			print "    ✓ created"
+			(( _doc_repaired++ ))
+		else
+			(( _doc_fail++ ))
+		fi
+	fi
+}
+
+# Check 4 callback: per-package health check.
+# POSIX-style: shares caller's scope (counters, _doc_fix flag).
+# Same pattern as _pack_freeze_entry.
+_pack_doctor_pkg_entry() {
+	typeset name="$1"
+	typeset _pdpe_path
+	_pdpe_path="${PACK_REGISTRY[$name].path}"
+
+	# Local packages: verify path exists
+	if [[ "${PACK_REGISTRY[$name].local:-}" == true ]]; then
+		if [[ -d "$_pdpe_path" ]]; then
+			print "  ✓ $name (local)"
+			(( _doc_ok++ ))
+		else
+			print "  ✗ $name — local path missing"
+			(( _doc_fail++ ))
+		fi
+		return
+	fi
+
+	# Remote packages: full git health checks
+	typeset _pdpe_status
+	if [[ ! -d "$_pdpe_path" ]]; then
+		_pdpe_status=missing
+	elif [[ ! -d "$_pdpe_path/.git" ]]; then
+		_pdpe_status=not-a-repo
+	elif ! command git -C "$_pdpe_path" rev-parse HEAD >/dev/null 2>&1; then
+		_pdpe_status=corrupt
+	else
+		_pdpe_status=ok
+	fi
+
+	case "$_pdpe_status" in
+	ok)
+		_pack_git_head "$_pdpe_path"
+		print "  ✓ $name ($REPLY)"
+		(( _doc_ok++ ))
+		;;
+	missing)
+		print "  ✗ $name — missing"
+		typeset _pdpe_src
+		_pdpe_src="${PACK_REGISTRY[$name].source}"
+		if _pack_git_is_url "$_pdpe_src"; then
+			typeset _pdpe_ans
+			if [[ "$_doc_fix" == true ]]; then
+				_pdpe_ans=y
+			else
+				print -n "    → reclone from ${_pdpe_src}? [y/N] "
+				read -r _pdpe_ans
+			fi
+			if [[ "$_pdpe_ans" == [yY] ]]; then
+				if _pack_doctor_repair_clone "$name" "$_pdpe_src" "$_pdpe_path"; then
+					(( _doc_repaired++ ))
+				else
+					(( _doc_fail++ ))
+				fi
+			else
+				(( _doc_fail++ ))
+			fi
+		else
+			print "    source is not a URL — cannot auto-repair"
+			(( _doc_fail++ ))
+		fi
+		;;
+	not-a-repo|corrupt)
+		print "  ✗ $name — $_pdpe_status"
+		typeset _pdpe_src
+		_pdpe_src="${PACK_REGISTRY[$name].source}"
+		if _pack_git_is_url "$_pdpe_src" && [[ -n "$_pdpe_path" && "$_pdpe_path" == "${PACK_PACKAGES}/"* ]]; then
+			typeset _pdpe_ans
+			if [[ "$_doc_fix" == true ]]; then
+				_pdpe_ans=y
+			else
+				print -n "    → remove and reclone from ${_pdpe_src}? [y/N] "
+				read -r _pdpe_ans
+			fi
+			if [[ "$_pdpe_ans" == [yY] ]]; then
+				command rm -rf "$_pdpe_path"
+				if _pack_doctor_repair_clone "$name" "$_pdpe_src" "$_pdpe_path"; then
+					(( _doc_repaired++ ))
+				else
+					(( _doc_fail++ ))
+				fi
+			else
+				(( _doc_fail++ ))
+			fi
+		else
+			if ! _pack_git_is_url "$_pdpe_src"; then
+				print "    source is not a URL — cannot auto-repair"
+			else
+				print "    path not under \$PACK_PACKAGES — refusing to remove"
+			fi
+			(( _doc_fail++ ))
+		fi
+		;;
+	esac
+}
+
+# Check 4: registered packages
+_pack_doctor_packages() {
+	_pack_each _pack_doctor_pkg_entry _pack_filter_enabled
+}
+
+# Check 5: stale directories not in registry
+_pack_doctor_orphans() {
+	typeset _pdo_entry _pdo_name _pdo_dir
+	for _pdo_entry in "$PACK_PACKAGES"/*/; do
+		[[ -d "$_pdo_entry" ]] || continue
+		_pdo_name="${_pdo_entry%/}"
+		_pdo_name="${_pdo_name##*/}"
+		[[ -n "${PACK_REGISTRY[$_pdo_name]+set}" ]] && continue
+		print "  ! orphan: ${_pdo_name}/"
+		(( _doc_warn++ ))
+		_pdo_dir="${_pdo_entry%/}"
+		if [[ -n "$_pdo_dir" && "$_pdo_dir" == "${PACK_PACKAGES}/"* ]]; then
+			typeset _pdo_ans
+			if [[ "$_doc_fix" == true ]]; then
+				_pdo_ans=y
+			else
+				print -n "    → remove ${_pdo_dir}? [y/N] "
+				read -r _pdo_ans
+			fi
+			if [[ "$_pdo_ans" == [yY] ]]; then
+				command rm -rf "$_pdo_dir"
+				print "    ✓ removed"
+				(( _doc_repaired++ ))
+			fi
+		fi
+	done
+}
+
+function _pack_cmd_doctor {
+	typeset _doc_fix=false
+	typeset -i _doc_ok=0 _doc_warn=0 _doc_fail=0 _doc_repaired=0
+
+	[[ "${1:-}" == --fix ]] && _doc_fix=true
+
+	print "pack doctor"
+	_pack_doctor_ksh
+	_pack_doctor_func
+	_pack_doctor_dirs
+	_pack_doctor_packages
+	_pack_doctor_orphans
+
+	# Summary
+	typeset -a _parts=()
+	(( _doc_ok > 0 )) && _parts+=("${_doc_ok} ok")
+	(( _doc_repaired > 0 )) && _parts+=("${_doc_repaired} repaired")
+	(( _doc_warn > 0 )) && _parts+=("${_doc_warn} warning")
+	(( _doc_fail > 0 )) && _parts+=("${_doc_fail} failed")
+
+	typeset _summary=""
+	typeset -i _i
+	for (( _i = 0; _i < ${#_parts[@]}; _i++ )); do
+		(( _i > 0 )) && _summary+=", "
+		_summary+="${_parts[_i]}"
+	done
+
+	print ""
+	print "$_summary"
+
+	(( _doc_fail > 0 )) && return 1
+	return 0
 }
