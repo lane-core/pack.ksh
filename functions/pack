@@ -37,14 +37,25 @@ function _pack_pool {
 	typeset -i pool_fd
 	exec {pool_fd}<>"$fifo"
 
-	trap 'kill $(jobs -p) 2>/dev/null; exec {pool_fd}<&-' INT TERM
+	# Track worker PIDs manually for interrupt cleanup.
+	# Workers spawn in pipe subshells (to stay out of the job table),
+	# so jobs -p can't find them.
+	typeset -a _pool_pids=()
+	trap 'kill "${_pool_pids[@]}" 2>/dev/null; exec {pool_fd}<&-' INT TERM
 
-	typeset name="" line=""
+	typeset name="" line="" _pool_last_pid=""
 
 	while (( next < total )); do
 		name="${queue[next]}"
 		(( next++ ))
-		{ "$worker" "$name" > "$pool_dir/$name.log" 2>&1; print -r -- "$name"$'\t'"$?" >&${pool_fd}; } &
+		# Pipe subshell: the pipe forces a real fork, so & inside
+		# never enters the parent's job table. Worker PID piped back.
+		_pool_last_pid=''
+		{
+			{ "$worker" "$name" > "$pool_dir/$name.log" 2>&1; print -r -- "$name"$'\t'"$?" >&${pool_fd}; } &
+			print -r -- $!
+		} | IFS= read -r _pool_last_pid
+		(( ${_pool_last_pid:-0} > 0 )) && _pool_pids+=($_pool_last_pid)
 		(( active++ ))
 		if (( active >= PACK_JOBS )); then
 			line=""
