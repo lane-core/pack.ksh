@@ -29,6 +29,10 @@ unset _pack_dir
 	return 1
 }
 
+# ── Progress Tracking ───────────────────────────────────────────────────────
+# Global instance shared by all commands — no namerefs needed.
+Progress_t _pack_progress
+
 # ── Data Structures ──────────────────────────────────────────────────────────
 typeset -C -A PACK_REGISTRY  # name -> compound: path, source, branch, tag, commit, local, load, disabled, build, source_file, depends
 typeset -C -A PACK_CONFIGS   # name -> compound: fpath[], path[], depends[], alias[], env[], rc

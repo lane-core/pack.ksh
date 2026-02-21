@@ -57,16 +57,19 @@ function _pack_pool {
 		} | IFS= read -r _pool_last_pid
 		(( ${_pool_last_pid:-0} > 0 )) && _pool_pids+=($_pool_last_pid)
 		(( active++ ))
+		(( _pack_progress.total > 0 )) && _pack_progress.pool_start "$name"
 		if (( active >= PACK_JOBS )); then
 			line=""
 			if ! read -t 300 -r line <&${pool_fd}; then
 				print -u2 "pack: worker pool: timed out waiting for worker"
 				(( active-- ))
+				(( _pack_progress.total > 0 )) && _pack_progress.pool_finish
 				continue
 			fi
-			[[ -z "$line" ]] && { (( active-- )); continue; }
+			[[ -z "$line" ]] && { (( active-- )); (( _pack_progress.total > 0 )) && _pack_progress.pool_finish; continue; }
 			pool_rc[${line%%$'\t'*}]="${line#*$'\t'}"
 			(( active-- ))
+			(( _pack_progress.total > 0 )) && _pack_progress.pool_finish
 		fi
 	done
 
@@ -75,11 +78,13 @@ function _pack_pool {
 		if ! read -t 300 -r line <&${pool_fd}; then
 			print -u2 "pack: worker pool: timed out waiting for worker"
 			(( active-- ))
+			(( _pack_progress.total > 0 )) && _pack_progress.pool_finish
 			continue
 		fi
-		[[ -z "$line" ]] && { (( active-- )); continue; }
+		[[ -z "$line" ]] && { (( active-- )); (( _pack_progress.total > 0 )) && _pack_progress.pool_finish; continue; }
 		pool_rc[${line%%$'\t'*}]="${line#*$'\t'}"
 		(( active-- ))
+		(( _pack_progress.total > 0 )) && _pack_progress.pool_finish
 	done
 
 	trap - INT TERM
@@ -133,7 +138,7 @@ function _pack_cmd_install {
 		return 0
 	fi
 
-	# ── Collect ──
+	# ── Collect — filter into queue, skip messages before progress starts ──
 	for name in "${names[@]}"; do
 		[[ -z "${PACK_REGISTRY[$name]+set}" ]] && { print -u2 "pack: unknown package: $name"; continue; }
 		[[ "${PACK_REGISTRY[$name].disabled}" == true ]] && { print "pack: $name is disabled, skipping"; continue; }
@@ -141,17 +146,19 @@ function _pack_cmd_install {
 		typeset _ipath
 		_ipath="${PACK_REGISTRY[$name].path}"
 		[[ -d "$_ipath" ]] && { print "pack: $name already installed"; continue; }
-		print "pack: installing $name ..."
 		queue+=("$name")
 	done
 
 	(( ${#queue[@]} == 0 )) && return 0
 
 	# ── Dispatch ──
+	_pack_progress.begin ${#queue[@]} "installed" "cloning"
+
 	typeset -A _pack_rc
 	typeset _pack_tmpdir=""
 	if (( ${#queue[@]} == 1 )); then
 		name="${queue[0]}"
+		_pack_progress.item "$name"
 		_pack_install_worker "$name"
 		_pack_rc[$name]=$?
 	else
@@ -172,13 +179,16 @@ function _pack_cmd_install {
 			if [[ -n "$_pack_tmpdir" && -f "$_pack_tmpdir/$name.log" ]]; then
 				_pci_msg="$(< "$_pack_tmpdir/$name.log")"
 			fi
+			_pack_progress.err "$name" "$_pci_msg"
 			_pack_accum_err _pci_acc "${name}: ${_pci_msg}"
 			continue
 		fi
 		_pack_run_build "$name" "$dir" || continue
 		_pack_stamp "$dir" "$name"
-		print "pack: $name installed (${PACK_STATE[$name].commit})"
+		_pack_progress.ok "$name" "${PACK_STATE[$name].commit}"
 	done
+
+	_pack_progress.end
 
 	# ── Cleanup ──
 	if [[ -n "$_pack_tmpdir" ]]; then
@@ -197,7 +207,7 @@ function _pack_cmd_update {
 	typeset name
 	Result_t _pcu_acc
 
-	# ── Collect ──
+	# ── Collect — filter into queue, skip messages before progress starts ──
 	for name in "${names[@]}"; do
 		[[ -z "${PACK_REGISTRY[$name]+set}" ]] && { print -u2 "pack: unknown package: $name"; continue; }
 		[[ "${PACK_REGISTRY[$name].disabled}" == true ]] && { print "pack: $name is disabled, skipping"; continue; }
@@ -217,10 +227,13 @@ function _pack_cmd_update {
 	(( ${#queue[@]} == 0 )) && return 0
 
 	# ── Dispatch ──
+	_pack_progress.begin ${#queue[@]} "updated" "fetching"
+
 	typeset -A _pack_rc
 	typeset _pack_tmpdir=""
 	if (( ${#queue[@]} == 1 )); then
 		name="${queue[0]}"
+		_pack_progress.item "$name"
 		_pack_update_worker "$name"
 		_pack_rc[$name]=$?
 	else
@@ -241,6 +254,7 @@ function _pack_cmd_update {
 			if [[ -n "$_pack_tmpdir" && -f "$_pack_tmpdir/$name.log" ]]; then
 				_pcu_msg="$(< "$_pack_tmpdir/$name.log")"
 			fi
+			_pack_progress.err "$name" "$_pcu_msg"
 			_pack_accum_err _pcu_acc "${name}: ${_pcu_msg}"
 			continue
 		fi
@@ -251,11 +265,13 @@ function _pack_cmd_update {
 				continue
 			}
 			_pack_stamp "$dir" "$name"
-			print "pack: $name updated (${old_heads[$name]} -> $REPLY)"
+			_pack_progress.ok "$name" "${old_heads[$name]} → $REPLY"
 		else
-			print "pack: $name already up to date ($REPLY)"
+			_pack_progress.ok "$name" "up to date"
 		fi
 	done
+
+	_pack_progress.end
 
 	# ── Cleanup ──
 	if [[ -n "$_pack_tmpdir" ]]; then
@@ -831,6 +847,7 @@ function _pack_cmd_doctor {
 	_pack_doctor_orphans
 
 	# Summary
+	typeset -i _doc_total=$(( _doc_ok + _doc_fail + _doc_warn + _doc_repaired ))
 	typeset -a _parts=()
 	(( _doc_ok > 0 )) && _parts+=("${_doc_ok} ok")
 	(( _doc_repaired > 0 )) && _parts+=("${_doc_repaired} repaired")
@@ -845,7 +862,7 @@ function _pack_cmd_doctor {
 	done
 
 	print ""
-	print "$_summary"
+	print "[${_doc_total} checked] $_summary"
 
 	(( _doc_fail > 0 )) && return 1
 	return 0
