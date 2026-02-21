@@ -433,13 +433,15 @@ function _pack_read_decl {
 		typeset src
 		_pack_resolve_url "${PACK[$name].source}"; src="$REPLY"
 
-		typeset local_pkg="${PACK[$name].local:-false}"
+		typeset local_pkg
+		local_pkg="${PACK[$name].local:-false}"
 		[[ "$src" == /* ]] && local_pkg=true
 
 		typeset pkg_path
 		if [[ "$local_pkg" == true ]]; then
 			pkg_path="$src"
-			typeset url="${PACK[$name].url:-}"
+			typeset url
+			url="${PACK[$name].url:-}"
 			if [[ -n "$url" ]]; then
 				_pack_resolve_url "$url"; src="$REPLY"
 			fi
