@@ -84,7 +84,7 @@ function _pack_disable {
 # ── Source Lib Helpers ────────────────────────────────────────────────────────
 # Git operations, dependency resolution, and lockfile management. Each is
 # optional — pack.ksh works for declaration without them.
-for _pack_lib in errors git resolve lock config hooks; do
+for _pack_lib in errors git async resolve lock config hooks; do
 	if [[ -f "$PACK_SELF/lib/${_pack_lib}.ksh" ]]; then
 		. "$PACK_SELF/lib/${_pack_lib}.ksh" || {
 			print -u2 "pack: failed to source lib/${_pack_lib}.ksh"

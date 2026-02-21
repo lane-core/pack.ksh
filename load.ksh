@@ -16,45 +16,61 @@ typeset _pack_l_branch _pack_l_tag _pack_l_commit
 typeset _pack_l_load _pack_l_disabled _pack_l_local _pack_l_entry _pack_l_sf
 typeset -i _pack_l_fail=0
 
+# ── Pass 1: Defer clones for missing packages (concurrent) ─────────────────
+# All clones start in parallel via defer -k. Network I/O overlaps; the OS
+# handles scheduling. No results are consumed here — that's pass 2's job.
 for _pack_l_name in "${PACK_ORDER[@]}"; do
-	# Skip already-loaded packages
 	[[ -n "${PACK_LOADED[$_pack_l_name]+set}" ]] && continue
 
-	# Skip disabled (belt-and-suspenders; _pack_resolve already filters these)
 	_pack_l_disabled="${PACK_REGISTRY[$_pack_l_name].disabled}"
 	[[ "$_pack_l_disabled" == true ]] && continue
 
-	# Extract metadata fields via compound access
 	_pack_l_path="${PACK_REGISTRY[$_pack_l_name].path}"
 	_pack_l_source="${PACK_REGISTRY[$_pack_l_name].source}"
-	_pack_l_branch="${PACK_REGISTRY[$_pack_l_name].branch}"
-	_pack_l_tag="${PACK_REGISTRY[$_pack_l_name].tag}"
-	_pack_l_commit="${PACK_REGISTRY[$_pack_l_name].commit}"
+	_pack_l_load="${PACK_REGISTRY[$_pack_l_name].load}"
+
+	[[ "$_pack_l_load" == manual ]] && continue
+
+	if [[ ! -d "$_pack_l_path" ]] && _pack_git_is_url "$_pack_l_source"; then
+		_pack_l_branch="${PACK_REGISTRY[$_pack_l_name].branch}"
+		_pack_l_tag="${PACK_REGISTRY[$_pack_l_name].tag}"
+		_pack_l_commit="${PACK_REGISTRY[$_pack_l_name].commit}"
+		_pack_fire pre-install "$_pack_l_name"
+		_pack_defer_clone "$_pack_l_name" "$_pack_l_source" "$_pack_l_path" \
+			"$_pack_l_branch" "$_pack_l_tag" "$_pack_l_commit"
+	fi
+done
+
+# ── Pass 2: Await clones + apply config in dependency order ────────────────
+# Results consumed in PACK_ORDER so package A is fully loaded before
+# dependent B is configured. await on an already-finished clone is O(1).
+for _pack_l_name in "${PACK_ORDER[@]}"; do
+	[[ -n "${PACK_LOADED[$_pack_l_name]+set}" ]] && continue
+
+	_pack_l_disabled="${PACK_REGISTRY[$_pack_l_name].disabled}"
+	[[ "$_pack_l_disabled" == true ]] && continue
+
+	_pack_l_path="${PACK_REGISTRY[$_pack_l_name].path}"
 	_pack_l_load="${PACK_REGISTRY[$_pack_l_name].load}"
 	_pack_l_local="${PACK_REGISTRY[$_pack_l_name].local}"
 
-	# manual: skip — user loads via `pack path` and `. entry_point`
 	[[ "$_pack_l_load" == manual ]] && continue
 
-	# Install if not present on disk (remote packages only)
-	_pack_fire pre-install "$_pack_l_name"
-	if [[ ! -d "$_pack_l_path" ]]; then
-		if _pack_git_is_url "$_pack_l_source"; then
-			Result_t _pack_l_cr
-			_pack_git_clone _pack_l_cr "$_pack_l_source" "$_pack_l_path" \
-				"$_pack_l_branch" "$_pack_l_tag" "$_pack_l_commit"
-			if _pack_l_cr.is_err; then
-				print -u2 "pack: ${_pack_l_name}: ${_pack_l_cr.error}"
-				(( _pack_l_fail++ ))
-				continue
-			fi
-		elif [[ "$_pack_l_local" != true ]]; then
-			print -u2 "pack: $_pack_l_name: package directory missing: $_pack_l_path"
+	# Await deferred clone or handle missing package
+	if [[ -n "${_PACK_CLONE_FUTURES[$_pack_l_name]:-}" ]]; then
+		Result_t _pack_l_cr
+		_pack_await_clone _pack_l_cr "$_pack_l_name"
+		if _pack_l_cr.is_err; then
+			print -u2 "pack: ${_pack_l_name}: ${_pack_l_cr.error}"
 			(( _pack_l_fail++ ))
 			continue
 		fi
+		_pack_fire post-install "$_pack_l_name"
+	elif [[ ! -d "$_pack_l_path" && "$_pack_l_local" != true ]]; then
+		print -u2 "pack: $_pack_l_name: package directory missing: $_pack_l_path"
+		(( _pack_l_fail++ ))
+		continue
 	fi
-	_pack_fire post-install "$_pack_l_name"
 
 	# ── Apply declarative fields ────────────────────────────────────
 	pack_apply_env   "$_pack_l_name"

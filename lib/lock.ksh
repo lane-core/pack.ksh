@@ -57,7 +57,8 @@ function pack_freeze {
 
 # ── Restore ───────────────────────────────────────────────────────────
 # Install packages from the lockfile at their exact recorded commits,
-# ignoring any branch/tag declarations in pack.ksh.
+# ignoring any branch/tag declarations in pack.ksh. Clones run
+# concurrently via defer/await; results are collected sequentially.
 function pack_restore {
     _pack_lock_path
     typeset lockfile="$REPLY"
@@ -68,29 +69,43 @@ function pack_restore {
     }
 
     typeset -i _prs_count=0
-    typeset _prs_line _prs_name _prs_source _prs_commit _prs_ts
+    typeset _prs_name _prs_source _prs_commit _prs_ts _prs_dest
+    typeset -a _prs_d_names=() _prs_d_commits=() _prs_d_ts=()
     Result_t _prs_acc
 
+    # Pass 1: Read lockfile, handle present packages, defer missing clones
     while IFS='|' read -r _prs_name _prs_source _prs_commit _prs_ts; do
-        # Skip comments and blank lines
         [[ "$_prs_name" == '#'* || -z "$_prs_name" ]] && continue
 
-        typeset _prs_dest="$PACK_PACKAGES/$_prs_name"
+        _prs_dest="$PACK_PACKAGES/$_prs_name"
 
         if [[ -d "$_prs_dest" ]]; then
             print "pack: ${_prs_name} already present, skipping"
+            PACK_STATE[$_prs_name]=(commit="$_prs_commit" timestamp="$_prs_ts")
+            (( _prs_count++ ))
         else
-            Result_t _prs_cr
-            _pack_git_clone _prs_cr "$_prs_source" "$_prs_dest" "" "" "$_prs_commit"
-            if _prs_cr.is_err; then
-                _pack_accum_err _prs_acc "${_prs_name}: ${_prs_cr.error}"
-                continue
-            fi
+            _prs_d_names+=("$_prs_name")
+            _prs_d_commits+=("$_prs_commit")
+            _prs_d_ts+=("$_prs_ts")
+            _pack_defer_clone "$_prs_name" "$_prs_source" "$_prs_dest" "" "" "$_prs_commit"
+        fi
+    done < "$lockfile"
+
+    # Pass 2: Await deferred clones and update state
+    typeset -i _prs_i
+    for (( _prs_i = 0; _prs_i < ${#_prs_d_names[@]}; _prs_i++ )); do
+        _prs_name="${_prs_d_names[$_prs_i]}"
+
+        Result_t _prs_cr
+        _pack_await_clone _prs_cr "$_prs_name"
+        if _prs_cr.is_err; then
+            _pack_accum_err _prs_acc "${_prs_name}: ${_prs_cr.error}"
+            continue
         fi
 
-        PACK_STATE[$_prs_name]=(commit="$_prs_commit" timestamp="$_prs_ts")
+        PACK_STATE[$_prs_name]=(commit="${_prs_d_commits[$_prs_i]}" timestamp="${_prs_d_ts[$_prs_i]}")
         (( _prs_count++ ))
-    done < "$lockfile"
+    done
 
     print "pack: restored ${_prs_count} package(s) from lockfile"
     _pack_report_errors _prs_acc
