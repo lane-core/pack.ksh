@@ -34,6 +34,7 @@ unset _pack_dir
 Progress_t _pack_progress
 
 # ── Data Structures ──────────────────────────────────────────────────────────
+typeset -C -A PACK           # name -> compound: user-facing package declarations
 typeset -C -A PACK_REGISTRY  # name -> compound: path, source, branch, tag, commit, local, load, disabled, build, source_file, depends
 typeset -C -A PACK_CONFIGS   # name -> compound: fpath[], path[], depends[], alias[], env[], rc
 typeset -C -A PACK_STATE     # name -> compound: commit, timestamp
@@ -410,6 +411,82 @@ PACK_REGISTRY[pack]=(
 )
 PACK_LOADED[pack]=1
 
+# ── Process PACK Compound Declarations ────────────────────────────────────
+# Convert PACK[name]=(source=... ...) entries into PACK_REGISTRY/PACK_CONFIGS.
+# Runs after config files are sourced, so PACK[] entries from any config
+# layer are picked up. Coexists with pack() — both populate the same registries.
+function _pack_read_decl {
+	typeset name
+	for name in "${!PACK[@]}"; do
+		[[ -z "${PACK[$name].source:-}" ]] && continue
+
+		if [[ "$name" == *[[:space:]]* || "$name" == *['*?[']*  ]]; then
+			print -u2 "pack: PACK[$name]: invalid package name"
+			continue
+		fi
+
+		[[ "${PACK[$name].disabled:-}" == true ]] && {
+			PACK_REGISTRY[$name]=(disabled=true)
+			continue
+		}
+
+		typeset src
+		_pack_resolve_url "${PACK[$name].source}"; src="$REPLY"
+
+		typeset local_pkg="${PACK[$name].local:-false}"
+		[[ "$src" == /* ]] && local_pkg=true
+
+		typeset pkg_path
+		if [[ "$local_pkg" == true ]]; then
+			pkg_path="$src"
+			typeset url="${PACK[$name].url:-}"
+			if [[ -n "$url" ]]; then
+				_pack_resolve_url "$url"; src="$REPLY"
+			fi
+		else
+			pkg_path="$PACK_PACKAGES/$name"
+		fi
+
+		# Array fields → space-separated strings for registry + real arrays for configs
+		typeset depends_s fpath_s path_s alias_s env_s
+		depends_s="${PACK[$name].depends[*]:-}"
+		fpath_s="${PACK[$name].fpath[*]:-}"
+		path_s="${PACK[$name].path[*]:-}"
+		alias_s="${PACK[$name].alias[*]:-}"
+		env_s="${PACK[$name].env[*]:-}"
+
+		PACK_REGISTRY[$name]=(
+			path="$pkg_path"
+			source="$src"
+			branch="${PACK[$name].branch:-}"
+			tag="${PACK[$name].tag:-}"
+			commit="${PACK[$name].commit:-}"
+			local="$local_pkg"
+			load="${PACK[$name].load:-autoload}"
+			disabled=false
+			build="${PACK[$name].build:-}"
+			source_file="${PACK[$name].entry:-}"
+			depends="$depends_s"
+		)
+
+		typeset -a fpath_a=() path_a=() depends_a=() alias_a=() env_a=()
+		[[ -n "$fpath_s" ]]   && fpath_a=($fpath_s)
+		[[ -n "$path_s" ]]    && path_a=($path_s)
+		[[ -n "$depends_s" ]] && depends_a=($depends_s)
+		[[ -n "$alias_s" ]]   && alias_a=($alias_s)
+		[[ -n "$env_s" ]]     && env_a=($env_s)
+
+		PACK_CONFIGS[$name]=(
+			typeset -a fpath=("${fpath_a[@]}")
+			typeset -a path=("${path_a[@]}")
+			typeset -a depends=("${depends_a[@]}")
+			typeset -a alias=("${alias_a[@]}")
+			typeset -a env=("${env_a[@]}")
+			rc="${PACK[$name].rc:-}"
+		)
+	done
+}
+
 # ── Read Configuration ────────────────────────────────────────────────────
 # Three config layers, last writer wins (same as multiple pack() calls):
 #   1. $PACK_CONFIG         — main ksh script (traditional)
@@ -428,6 +505,8 @@ if [[ -d "$_pack_config_dir/pkgs.d" ]]; then
 	unset _pack_pkgsd
 fi
 unset _pack_config_dir
+
+_pack_read_decl
 
 # ── Resolve + Load ────────────────────────────────────────────────────────
 _pack_fire pre-resolve
