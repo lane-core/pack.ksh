@@ -345,6 +345,12 @@ _pack_list_entry() {
 		else status="local/missing"; fi
 	elif [[ -d "$dir" ]]; then status="installed"
 	else status="missing"; fi
+	# Dirty working tree indicator
+	if [[ -d "${dir:-}/.git" ]]; then
+		typeset _ple_p
+		_ple_p=$(command git -C "$dir" status --porcelain 2>/dev/null)
+		[[ -n "$_ple_p" ]] && status+='*'
+	fi
 	printf '%-20s %-12s %-8s %s\n' "$name" "$status" "$ld" "${PACK_LOADED[$name]:+yes}"
 }
 
@@ -833,6 +839,152 @@ _pack_doctor_orphans() {
 	done
 }
 
+# Check 6 callback: dirty working tree detection.
+_pack_doctor_dirty_entry() {
+	typeset name="$1"
+	typeset _pdde_path="${PACK_REGISTRY[$name].path:-}"
+	[[ -d "$_pdde_path/.git" ]] || return 0
+
+	typeset _pdde_p
+	_pdde_p=$(command git -C "$_pdde_path" status --porcelain 2>/dev/null) || return 0
+	[[ -z "$_pdde_p" ]] && return 0
+
+	typeset -i _pdde_count=0
+	while IFS= read -r _; do
+		(( _pdde_count++ ))
+	done <<< "$_pdde_p"
+
+	print "  ! $name — dirty working tree (${_pdde_count} changed file(s))"
+	(( _doc_warn++ ))
+}
+
+# Check 6: dirty working trees
+_pack_doctor_dirty() {
+	_pack_each _pack_doctor_dirty_entry _pack_filter_installed
+}
+
+# Check 7: dependency validation
+_pack_doctor_deps() {
+	typeset -i _pddp_ok=0 _pddp_fail=0
+	typeset _pddp_name _pddp_dep _pddp_dep_name _pddp_dep_path _pddp_sf _pddp_entry
+
+	for _pddp_name in "${!PACK_REGISTRY[@]}"; do
+		[[ -z "${PACK_CONFIGS[$_pddp_name]+set}" ]] && continue
+		typeset -i _pddp_n=${#PACK_CONFIGS[$_pddp_name].depends[@]}
+		(( _pddp_n == 0 )) && continue
+
+		typeset -i _pddp_i
+		for (( _pddp_i = 0; _pddp_i < _pddp_n; _pddp_i++ )); do
+			_pddp_dep="${PACK_CONFIGS[$_pddp_name].depends[_pddp_i]}"
+			_pddp_dep_name="${_pddp_dep%%@*}"
+
+			# Check registered
+			if [[ -z "${PACK_REGISTRY[$_pddp_dep_name]+set}" ]]; then
+				print "  ✗ $_pddp_name → $_pddp_dep_name (not registered)"
+				(( _pddp_fail++ ))
+				continue
+			fi
+
+			# Check directory exists
+			_pddp_dep_path="${PACK_REGISTRY[$_pddp_dep_name].path:-}"
+			if [[ ! -d "$_pddp_dep_path" ]]; then
+				print "  ✗ $_pddp_name → $_pddp_dep_name (directory missing)"
+				(( _pddp_fail++ ))
+
+				# --fix: offer to install if remote
+				if [[ "$_doc_fix" == true ]] && \
+				   _pack_git_is_url "${PACK_REGISTRY[$_pddp_dep_name].source:-}"; then
+					_pack_cmd_install "$_pddp_dep_name" && (( _doc_repaired++ ))
+				fi
+				continue
+			fi
+
+			# Check entry point exists
+			_pddp_sf="${PACK_REGISTRY[$_pddp_dep_name].source_file:-}"
+			_pddp_entry=""
+			if [[ -n "$_pddp_sf" ]]; then
+				if [[ "$_pddp_sf" == /* ]]; then
+					_pddp_entry="$_pddp_sf"
+				else
+					_pddp_entry="$_pddp_dep_path/$_pddp_sf"
+				fi
+			elif [[ -f "$_pddp_dep_path/init.ksh" ]]; then
+				_pddp_entry="$_pddp_dep_path/init.ksh"
+			elif [[ -f "$_pddp_dep_path/plugin.ksh" ]]; then
+				_pddp_entry="$_pddp_dep_path/plugin.ksh"
+			elif [[ -f "$_pddp_dep_path/${_pddp_dep_name}.ksh" ]]; then
+				_pddp_entry="$_pddp_dep_path/${_pddp_dep_name}.ksh"
+			fi
+
+			if [[ -n "$_pddp_entry" && -f "$_pddp_entry" ]]; then
+				(( _pddp_ok++ ))
+			elif [[ "${PACK_REGISTRY[$_pddp_dep_name].load:-}" == manual ]]; then
+				# Manual-load packages may not need an entry point
+				(( _pddp_ok++ ))
+			else
+				print "  ✗ $_pddp_name → $_pddp_dep_name (no entry point)"
+				(( _pddp_fail++ ))
+			fi
+		done
+	done
+
+	if (( _pddp_ok + _pddp_fail == 0 )); then
+		return 0  # no dependencies declared anywhere
+	fi
+
+	if (( _pddp_fail == 0 )); then
+		print "  ✓ dependencies (${_pddp_ok} verified)"
+		(( _doc_ok++ ))
+	else
+		(( _doc_fail += _pddp_fail ))
+	fi
+}
+
+# Check 8 callback: behind remote detection.
+_pack_doctor_behind_entry() {
+	typeset name="$1"
+	typeset _pdbe_path="${PACK_REGISTRY[$name].path:-}"
+	[[ -d "$_pdbe_path/.git" ]] || return 0
+
+	# Skip if network already failed
+	(( _doc_net_ok == 0 )) && return 0
+
+	_pack_git_full_head "$_pdbe_path" || return 0
+	typeset _pdbe_local=$REPLY
+
+	typeset _pdbe_src="${PACK_REGISTRY[$name].source:-}"
+	typeset _pdbe_ref="${PACK_REGISTRY[$name].branch:-${PACK_REGISTRY[$name].tag:-}}"
+
+	if ! _pack_git_remote_head "$_pdbe_src" "${_pdbe_ref:-HEAD}"; then
+		if (( _doc_net_ok < 0 )); then
+			# First network failure — warn and disable further checks
+			print "  ! network unavailable — skipping remote checks"
+			(( _doc_warn++ ))
+			_doc_net_ok=0
+		fi
+		return 0
+	fi
+	_doc_net_ok=1
+
+	if [[ "$_pdbe_local" == "$REPLY" ]]; then
+		return 0
+	fi
+
+	print "  ! $name — behind remote (${_pdbe_local:0:7} → ${REPLY:0:7})"
+	(( _doc_warn++ ))
+
+	# --fix: offer to update
+	if [[ "$_doc_fix" == true ]]; then
+		_pack_cmd_update "$name" && (( _doc_repaired++ ))
+	fi
+}
+
+# Check 8: behind remote
+_pack_doctor_behind() {
+	typeset -i _doc_net_ok=-1  # -1=untested, 0=failed, 1=ok
+	_pack_each _pack_doctor_behind_entry _pack_filter_remote
+}
+
 function _pack_cmd_doctor {
 	typeset _doc_fix=false
 	typeset -i _doc_ok=0 _doc_warn=0 _doc_fail=0 _doc_repaired=0
@@ -845,6 +997,9 @@ function _pack_cmd_doctor {
 	_pack_doctor_dirs
 	_pack_doctor_packages
 	_pack_doctor_orphans
+	_pack_doctor_dirty
+	_pack_doctor_deps
+	_pack_doctor_behind
 
 	# Summary
 	typeset -i _doc_total=$(( _doc_ok + _doc_fail + _doc_warn + _doc_repaired ))
