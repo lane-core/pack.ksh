@@ -842,7 +842,8 @@ _pack_doctor_orphans() {
 # Check 6 callback: dirty working tree detection.
 _pack_doctor_dirty_entry() {
 	typeset name="$1"
-	typeset _pdde_path="${PACK_REGISTRY[$name].path:-}"
+	typeset _pdde_path
+	_pdde_path="${PACK_REGISTRY[$name].path:-}"
 	[[ -d "$_pdde_path/.git" ]] || return 0
 
 	typeset _pdde_p
@@ -870,7 +871,8 @@ _pack_doctor_deps() {
 
 	for _pddp_name in "${!PACK_REGISTRY[@]}"; do
 		[[ -z "${PACK_CONFIGS[$_pddp_name]+set}" ]] && continue
-		typeset -i _pddp_n=${#PACK_CONFIGS[$_pddp_name].depends[@]}
+		typeset -i _pddp_n=0
+		_pddp_n=${#PACK_CONFIGS[$_pddp_name].depends[@]}
 		(( _pddp_n == 0 )) && continue
 
 		typeset -i _pddp_i
@@ -943,17 +945,20 @@ _pack_doctor_deps() {
 # Check 8 callback: behind remote detection.
 _pack_doctor_behind_entry() {
 	typeset name="$1"
-	typeset _pdbe_path="${PACK_REGISTRY[$name].path:-}"
+	typeset _pdbe_path
+	_pdbe_path="${PACK_REGISTRY[$name].path:-}"
 	[[ -d "$_pdbe_path/.git" ]] || return 0
 
 	# Skip if network already failed
 	(( _doc_net_ok == 0 )) && return 0
 
 	_pack_git_full_head "$_pdbe_path" || return 0
-	typeset _pdbe_local=$REPLY
+	typeset _pdbe_local
+	_pdbe_local=$REPLY
 
-	typeset _pdbe_src="${PACK_REGISTRY[$name].source:-}"
-	typeset _pdbe_ref="${PACK_REGISTRY[$name].branch:-${PACK_REGISTRY[$name].tag:-}}"
+	typeset _pdbe_src _pdbe_ref
+	_pdbe_src="${PACK_REGISTRY[$name].source:-}"
+	_pdbe_ref="${PACK_REGISTRY[$name].branch:-${PACK_REGISTRY[$name].tag:-}}"
 
 	if ! _pack_git_remote_head "$_pdbe_src" "${_pdbe_ref:-HEAD}"; then
 		if (( _doc_net_ok < 0 )); then
