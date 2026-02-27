@@ -29,12 +29,6 @@ unset _pack_dir
 	return 1
 }
 
-# ── async.ksh — defer/await/poll ─────────────────────────────────────────────
-. "${PACK_SELF}/../async.ksh/init.ksh" || {
-	print -u2 "pack: failed to source async.ksh"
-	return 1
-}
-
 # ── pack.ksh types and toposort ──────────────────────────────────────────────
 for _pack_tf in "${PACK_SELF}"/types/*.ksh; do
 	[[ -f "$_pack_tf" ]] && . "$_pack_tf"
