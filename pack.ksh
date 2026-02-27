@@ -29,6 +29,22 @@ unset _pack_dir
 	return 1
 }
 
+# ── async.ksh — defer/await/poll ─────────────────────────────────────────────
+. "${PACK_SELF}/../async.ksh/init.ksh" || {
+	print -u2 "pack: failed to source async.ksh"
+	return 1
+}
+
+# ── pack.ksh types and toposort ──────────────────────────────────────────────
+for _pack_tf in "${PACK_SELF}"/types/*.ksh; do
+	[[ -f "$_pack_tf" ]] && . "$_pack_tf"
+done
+unset _pack_tf
+. "${PACK_SELF}/lib/toposort.ksh" || {
+	print -u2 "pack: failed to source lib/toposort.ksh"
+	return 1
+}
+
 # ── Progress Tracking ───────────────────────────────────────────────────────
 # Global instance shared by all commands — no namerefs needed.
 Progress_t _pack_progress
@@ -83,7 +99,7 @@ function _pack_disable {
 		[[ "$_n" != "$name" ]] && _new+=("$_n")
 	done
 	PACK_ORDER=("${_new[@]}")
-	_pack_fire "package-disabled" "$name"
+	pack_fire "package-disabled" "$name"
 }
 
 # ── Source Lib Helpers ────────────────────────────────────────────────────────
@@ -511,8 +527,8 @@ unset _pack_config_dir
 _pack_read_decl
 
 # ── Resolve + Load ────────────────────────────────────────────────────────
-_pack_fire pre-resolve
+pack_fire pre-resolve
 _pack_resolve || return 1
-_pack_fire post-resolve
+pack_fire post-resolve
 . "$PACK_SELF/load.ksh"
-_pack_fire ready
+pack_fire ready

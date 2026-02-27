@@ -35,7 +35,7 @@ for _pack_l_name in "${PACK_ORDER[@]}"; do
 		_pack_l_branch="${PACK_REGISTRY[$_pack_l_name].branch}"
 		_pack_l_tag="${PACK_REGISTRY[$_pack_l_name].tag}"
 		_pack_l_commit="${PACK_REGISTRY[$_pack_l_name].commit}"
-		_pack_fire pre-install "$_pack_l_name"
+		pack_fire pre-install "$_pack_l_name"
 		_pack_defer_clone "$_pack_l_name" "$_pack_l_source" "$_pack_l_path" \
 			"$_pack_l_branch" "$_pack_l_tag" "$_pack_l_commit"
 	fi
@@ -65,7 +65,7 @@ for _pack_l_name in "${PACK_ORDER[@]}"; do
 			(( _pack_l_fail++ ))
 			continue
 		fi
-		_pack_fire post-install "$_pack_l_name"
+		pack_fire post-install "$_pack_l_name"
 	elif [[ ! -d "$_pack_l_path" && "$_pack_l_local" != true ]]; then
 		print -u2 "pack: $_pack_l_name: package directory missing: $_pack_l_path"
 		(( _pack_l_fail++ ))
@@ -79,7 +79,7 @@ for _pack_l_name in "${PACK_ORDER[@]}"; do
 	pack_apply_fpath "$_pack_l_name" "$_pack_l_path"
 
 	# ── Source entry point (load=now only) ──────────────────────────
-	_pack_fire pre-load "$_pack_l_name"
+	pack_fire pre-load "$_pack_l_name"
 	if [[ "$_pack_l_load" == now ]]; then
 		_pack_l_entry=""
 		_pack_l_sf="${PACK_REGISTRY[$_pack_l_name].source_file}"
@@ -108,7 +108,7 @@ for _pack_l_name in "${PACK_ORDER[@]}"; do
 
 	# ── Eval rc snippet ─────────────────────────────────────────────
 	pack_apply_rc "$_pack_l_name" "$_pack_l_path"
-	_pack_fire post-load "$_pack_l_name"
+	pack_fire post-load "$_pack_l_name"
 
 	PACK_LOADED[$_pack_l_name]=1
 done
