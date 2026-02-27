@@ -409,7 +409,7 @@ function pack_apply_rc {
 PACK_REGISTRY[pack]=(
 	path="$PACK_SELF"
 	source="${PACK_ORIGIN:-$PACK_SELF}"
-	branch=main
+	branch=ksh-fork
 	tag=""
 	commit=""
 	local=true
