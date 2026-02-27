@@ -608,12 +608,13 @@ function _pack_doctor_repair_clone {
 
 # Check 1: ksh version
 _pack_doctor_ksh() {
-	if [[ "${.sh.version}" == *93u+m* ]]; then
-		typeset _pdk_ver="${.sh.version##*' '}"
+	if [[ "${.sh.version}" == *93u+m* || "${.sh.version}" == *ksh26* ]]; then
+		typeset -a _pdk_words=( ${.sh.version} )
+		typeset _pdk_ver="${_pdk_words[2]}"
 		print "  ✓ ksh $_pdk_ver"
 		(( _doc_ok++ ))
 	else
-		print "  ✗ ksh — found ${.sh.version}, need 93u+m"
+		print "  ✗ ksh — found ${.sh.version}, need 93u+m or ksh26"
 		typeset _pdk_path
 		_pdk_path=$(command -v ksh 2>/dev/null)
 		[[ -n "$_pdk_path" ]] && print "    binary: $_pdk_path"

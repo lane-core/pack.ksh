@@ -6,10 +6,10 @@
 
 set -o nounset
 
-# ── ksh93 Detection ──────────────────────────────────────────────────────────
+# ── ksh Detection ────────────────────────────────────────────────────────────
 typeset version="${.sh.version:-}"
-if [[ -z "$version" || "$version" != *93* ]]; then
-	print -u2 "pack.ksh requires ksh93 (found: ${version:-not ksh93})"
+if [[ -z "$version" || ( "$version" != *93* && "$version" != *ksh26* ) ]]; then
+	print -u2 "pack.ksh requires ksh93 or ksh26 (found: ${version:-not ksh})"
 	print -u2 "Install ksh93u+m: https://github.com/ksh93/ksh93"
 	exit 1
 fi
